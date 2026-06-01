@@ -1,0 +1,122 @@
+---
+title: "Live tuning with NetworkTables tunables"
+sidebarTitle: "NT Tuning"
+description: "NtTunableDouble, NtTunableBoolean, and NtTunableInteger let you adjust robot parameters live from any NT4 dashboard without redeploying code."
+---
+
+REBUILT 2026 provides `NtTunableDouble`, `NtTunableBoolean`, and `NtTunableInteger` — lightweight wrappers that publish a default value to NetworkTables on startup and read back live overrides from any connected dashboard. This makes it possible to adjust vision weights, feature flags, and other parameters mid-session without redeploying robot code.
+
+## How they work
+
+Each wrapper follows the same pattern:
+
+<Steps>
+  <Step title="Construct with a path and default">
+    Pass the full NT4 key path and a default value. The constructor creates both a publisher (so the topic is immediately visible in the dashboard) and a subscriber with the default as the fallback.
+
+    ```java
+    NtTunableDouble A_XY_MT2 = new NtTunableDouble("/vision/A_XY_MT2", 0.07);
+    ```
+  </Step>
+  <Step title="Read the current value with .get()">
+    Each call to `.get()` returns the live value from the subscriber — either the dashboard override or the default if no override has been sent yet.
+
+    ```java
+    double coefficient = A_XY_MT2.get(); // e.g., returns 0.07 at start
+    ```
+  </Step>
+  <Step title="Optionally push updates from robot code">
+    Call `.set(value)` to update the published value from the robot side (for example, to reflect a new computed default). Dashboard overrides will continue to take precedence once set.
+  </Step>
+  <Step title="Check for changes">
+    Use `hasChangedSince(lastChangeTime)` with the timestamp returned by `getAtomic()` to detect when a value has been edited — useful for triggering reconfiguration on change.
+  </Step>
+</Steps>
+
+## Tunable types
+
+| Class | NT4 Type | `.get()` return | Typical use |
+|---|---|---|---|
+| `NtTunableDouble` | `double` | `double` | Continuous coefficients, thresholds |
+| `NtTunableBoolean` | `boolean` | `boolean` | Feature enable/disable flags |
+| `NtTunableInteger` | `integer` | `int` | Iteration counts, discrete setpoints |
+
+## All tunables defined in the codebase
+
+| NT Key | Type | Default | Purpose |
+|---|---|---|---|
+| `/vision/A_XY_MT2` | Double | `0.07` | Amplitude coefficient for MegaTag2 XY standard deviation |
+| `/vision/A_XY_MT1` | Double | `0.09` | Amplitude coefficient for MegaTag1 XY standard deviation |
+| `/vision/P_XY` | Double | `1.4` | Distance exponent in the std-dev formula (`dist^P_XY`) |
+| `/vision/defenseStdDevScale` | Double | `0.5` | Multiplier applied to std devs when defense contact is detected (< 1.0 = trust vision more) |
+| `/vision/disablevision` | Boolean | `false` | Set to `true` to disable all vision pose fusion |
+
+<Note>
+`/vision/disablevision` is subscribed as a raw `BooleanSubscriber` in `VisionSubsystem` rather than through an `NtTunableBoolean` wrapper, but it is functionally identical — the default is `false` and any dashboard write is picked up on the next `update()` call.
+</Note>
+
+## Using tunables from a dashboard
+
+Any NT4-compatible dashboard (SmartDashboard, Shuffleboard, Elastic) can read and write tunable values without any additional configuration.
+
+<Steps>
+  <Step title="Open a dashboard and connect to the robot">
+    Launch Elastic (or Shuffleboard) and ensure it is connected to the robot's NetworkTables server.
+  </Step>
+  <Step title="Locate the NT key in the source tree">
+    Navigate to the key path (e.g., `/vision/A_XY_MT2`) in the NT browser. The value will already be visible because the robot published the default at startup.
+  </Step>
+  <Step title="Add a widget">
+    Drag the entry onto a dashboard tab as a **Number Slider** or **Text Field** widget (for doubles/integers) or a **Toggle Switch** (for booleans). The robot reads the new value on the next periodic loop — no redeploy needed.
+  </Step>
+</Steps>
+
+<Tip>
+In Elastic, create a dedicated **"Vision Tuning"** tab and add all `/vision/*` entries as number-input or slider widgets. This gives the drive coach or technician a single view to tweak all vision fusion parameters during a practice session.
+</Tip>
+
+## HubShiftUtil: alliance color override via driver controller
+
+`HubShiftUtil` manages game-piece shift scheduling and hub targeting. It exposes an alliance color override that is normally driven by the FMS game-specific message, but can be forced from the driver controller for off-alliance testing:
+
+```java
+// Controls.java — driverController X = force "blue wins first" behavior
+driverController
+    .x()
+    .onTrue(
+        Commands.runOnce(
+                () -> HubShiftUtil.setAllianceWinOverride(() -> Optional.of(false)))
+            .withName("Enable Alliance Win Override")
+            .ignoringDisable(true));
+
+// driverController B = force "red wins first" behavior
+driverController
+    .b()
+    .onTrue(
+        Commands.runOnce(
+                () -> HubShiftUtil.setAllianceWinOverride(() -> Optional.of(true)))
+            .withName("Disable Alliance Win Override")
+            .ignoringDisable(true));
+```
+
+When the override is active, `AllianceUtils.getHubTranslation2d()` returns the hub coordinates for the overridden alliance, allowing the robot to target the opponent's hub during testing without an FMS connection.
+
+## GCMonitor
+
+`GCMonitor` registers JMX listeners on the JVM's garbage collectors and increments an internal counter each time a GC event fires. The count is logged via `DataLogManager` with the GC action, collector name, and duration:
+
+```java
+// Robot.java — called once at startup
+GCMonitor.start();
+```
+
+GC events are logged as:
+```
+GC #1 action=end of minor GC name=G1 Young Generation duration=3ms
+```
+
+Use the `GCCount` key in the DataLog post-match to identify periods of elevated GC pressure, which can cause loop overruns. If GC frequency increases noticeably, look for hotspots allocating objects in periodic methods.
+
+<Note>
+All NT tunable writes are captured in the WPILib DataLog automatically (because the NT4 server mirrors subscribed topics to the log). After a practice match you can replay the `.wpilog` file and see exactly which values were changed and when — useful for correlating a tuning change with observed robot behavior.
+</Note>

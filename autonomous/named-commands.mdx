@@ -1,0 +1,165 @@
+---
+title: "Named commands: PathPlanner integration for auto actions"
+sidebarTitle: "Named Commands"
+description: "How REBUILT 2026 registers launch, intake, and climb named commands so that PathPlanner .auto files can trigger robot actions by name."
+---
+
+PathPlanner named commands allow `.auto` files to trigger robot actions by string name. REBUILT 2026 registers three named commands — `launch`, `intake`, and `climb` — in `AutoLogic.registerCommands()`, which is called as the first step of `AutoLogic.initCommandsAndPaths()`.
+
+## Registered commands
+
+| Name | Real Robot | Simulation |
+|---|---|---|
+| `launch` | `launcherCommand()` | `launcherSimCommand()` |
+| `intake` | `intakeCommand()` | `intakeCommand()` |
+| `climb` | `climbCommand()` (no-op) | `climbCommand()` (no-op) |
+
+## registerCommands() source
+
+```java
+private static void registerCommands() {
+    if (s.launcherSubsystem != null && s.indexerSubsystem != null) {
+        if (Robot.isSimulation()) {
+            NamedCommands.registerCommand(
+                "launch", launcherSimCommand().andThen(Commands.print("launch")));
+        } else {
+            NamedCommands.registerCommand(
+                "launch", launcherCommand().andThen(Commands.print("launch")));
+        }
+    }
+    if (s.indexerSubsystem != null) {
+        NamedCommands.registerCommand("intake", intakeCommand());
+    }
+    NamedCommands.registerCommand("climb", climbCommand());
+}
+```
+
+<Note>
+  `registerCommands()` is intentionally called inside `initCommandsAndPaths()` **before** `initPaths()`. PathPlanner requires that all named commands are registered before any `.auto` file that references them is loaded. Never call `initPaths()` directly, as this ordering guarantee would be lost.
+</Note>
+
+## launch — real robot
+
+`launcherCommand()` is a parallel command group that aims the launcher, waits for the flywheel to reach target speed, then runs the indexer to feed the game piece. It times out after **4.5 seconds** and stows the launcher regardless of outcome.
+
+```java
+public static Command launcherCommand() {
+    return Commands.parallel(
+                Commands.runOnce(() -> s.flywheels.resetFuelCheck()),
+                s.launcherSubsystem.launcherAimCommand(),
+                Commands.waitUntil(() -> s.launcherSubsystem.isAtTarget())
+                    .andThen(s.indexerSubsystem.runIndexer(() -> s.flywheels.getTargetSpeed())))
+            .withTimeout(4.5)
+            .andThen(s.launcherSubsystem.rawStowCommand())
+            .withName("Auto Launcher Command");
+}
+```
+
+**Sequence breakdown:**
+
+1. `flywheels.resetFuelCheck()` — clears the "out of fuel" flag before the shot.
+2. `launcherAimCommand()` — runs concurrently, continuously updating hood and turret to track the target.
+3. `waitUntil(isAtTarget).andThen(runIndexer(...))` — waits for the launcher to reach its aim setpoint before feeding the indexer.
+4. `.withTimeout(4.5)` — the entire parallel group is cancelled after 4.5 s to prevent auto overruns.
+5. `.andThen(rawStowCommand())` — the launcher is stowed after the shot (or timeout).
+
+## launch — simulation
+
+`launcherSimCommand()` replaces the real launcher sequence in simulation with a two-step sequence: first align the drivebase toward the hub, then simulate a fuel launch for 3 seconds.
+
+```java
+public static Command launcherSimCommand() {
+    return Commands.sequence(
+                AutoDriveRotate.autoRotate(
+                    s.drivebaseSubsystem, () -> 0, () -> 0, () -> 0), // SIM PURPOSES ONLY
+                Commands.run(
+                        () -> FuelSim.getInstance()
+                            .launchFuel(
+                                MetersPerSecond.of(6),
+                                Radians.of(s.hood.getHoodPosition()),
+                                Radians.of(s.turretSubsystem.getTurretPosition() + Math.PI),
+                                Meters.of(1.45)))
+                    .withTimeout(3))
+            .withName("Auto Launcher Sim Command");
+}
+```
+
+<Warning>
+  `launcherSimCommand()` is a **simulation-only substitute** — it does not replicate real vision targeting or flywheel spin-up behaviour. `autoRotate` drives the drivebase to face the hub (using a PID controller against `AllianceUtils.getHubTranslation2d()`), and `FuelSim.launchFuel()` fires a projectile at a fixed 6 m/s muzzle speed using the current hood and turret positions. Expect differences in timing and scoring accuracy compared to the physical robot.
+</Warning>
+
+## intake
+
+`intakeCommand()` is a single `runOnce` that sets `Controls.intakeMode` to `IntakeMode.INTAKE`. The intake subsystem's default command then picks up the mode change and runs the intake rollers for the remainder of the path segment.
+
+```java
+public static Command intakeCommand() {
+    return Commands.runOnce(() -> Controls.intakeMode = IntakeMode.INTAKE)
+        .withName("Auto Intake Command");
+}
+```
+
+## climb
+
+`climbCommand()` is a no-op placeholder. The climb mechanism is not automated for the 2026 season.
+
+```java
+public static Command climbCommand() {
+    return Commands.none().withName("Auto Climb Command");
+}
+```
+
+## .auto file JSON format
+
+Named commands are referenced in `.auto` files using a `"named"` command type node. Below is an annotated excerpt from `C-Outpost-Depot.auto` showing how `intake` and `launch` are embedded:
+
+```json
+{
+  "version": "2025.0",
+  "command": {
+    "type": "sequential",
+    "data": {
+      "commands": [
+        {
+          "type": "deadline",
+          "data": {
+            "commands": [
+              {
+                "type": "sequential",
+                "data": {
+                  "commands": [
+                    { "type": "path", "data": { "pathName": "Center-DepotL" } },
+                    { "type": "path", "data": { "pathName": "DepotL-DepotF" } },
+                    { "type": "path", "data": { "pathName": "DepotF-DepotR" } }
+                  ]
+                }
+              },
+              {
+                "type": "named",
+                "data": { "name": "intake" }
+              }
+            ]
+          }
+        },
+        {
+          "type": "named",
+          "data": { "name": "launch" }
+        }
+      ]
+    }
+  },
+  "resetOdom": true,
+  "folder": "COMP",
+  "choreoAuto": false
+}
+```
+
+Key points about the `.auto` JSON schema:
+
+- **`"type": "named"`** — tells PathPlanner to look up the command by the string in `"name"` from the `NamedCommands` registry.
+- **`"type": "deadline"`** — runs all child commands until the first one finishes (here: paths run until complete, `intake` runs concurrently and is cancelled when the path ends).
+- **`"type": "sequential"`** — runs child commands one after another.
+- **`"resetOdom": true`** — PathPlanner resets odometry to the auto's starting pose when the auto begins.
+- **`"folder"`** — organises autos in the PathPlanner GUI (`COMP` for match-ready, `WIP` for in-development).
+
+When PathPlanner encounters a `"named"` node at runtime, it calls `NamedCommands.getCommand("intake")` (or whichever name is specified). If the command was not registered, PathPlanner substitutes a `Commands.none()` and logs a warning — which is why registration must happen before path loading.

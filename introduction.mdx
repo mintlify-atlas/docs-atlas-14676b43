@@ -1,0 +1,127 @@
+---
+title: "REBUILT 2026 — FRC robot codebase by Team Robototes"
+sidebarTitle: "Introduction"
+description: "An overview of Team Robototes' REBUILT 2026 FRC robot codebase: architecture, package layout, subsystems, and dual hardware configurations."
+---
+
+REBUILT 2026 is the competition robot codebase for Team Robototes (2412), written in WPILib command-based Java for the 2026 FRC game *REBUILT*. The project targets the RoboRIO 2 running Java 17 and is built with GradleRIO 2026.2.1. It drives a fully swerve-based drivetrain (CTRE Phoenix 6 TalonFX + CANcoder), an articulated launcher with a hood, a rotating turret, a game-piece intake and indexer, an LED strip, and a three-camera Limelight vision system — all coordinated through WPILib's `CommandScheduler`.
+
+---
+
+## High-level architecture
+
+The entry point is `Main.java`, which calls `RobotBase.startRobot(Robot::new)`. `Robot` extends `TimedRobot` and owns the top-level object graph.
+
+```
+Main
+ └─ Robot  (TimedRobot, 20 ms loop)
+     ├─ Subsystems  ← creates and holds every SubsystemBase
+     │    ├─ CommandSwerveDrivetrain  (drivebaseSubsystem)
+     │    ├─ LauncherSubsystem        (hood + flywheels + turret)
+     │    ├─ IntakeSubsystem          (pivot + rollers)
+     │    ├─ IndexerSubsystem         (spindexer + feeder)
+     │    ├─ VisionSubsystem          (three Limelights)
+     │    └─ LEDSubsystem             (CANdle)
+     ├─ Controls   ← all button bindings and default commands
+     └─ CommandScheduler.getInstance().run()  ← called every robotPeriodic()
+```
+
+`Robot.robotPeriodic()` is the heartbeat of the system. It runs the `CommandScheduler`, updates vision pose estimates from the drivetrain's SwerveDriveState, logs garbage-collection count to SmartDashboard, and resumes the DataLog every second.
+
+<Note>
+`Controls` is instantiated after `Subsystems`. It receives the `Subsystems` object and a `SimWrapper` and registers all `CommandXboxController` trigger bindings there. No robot logic lives in the periodic callbacks beyond calling `CommandScheduler.run()`.
+</Note>
+
+---
+
+## Package structure
+
+| Package | Contents |
+|---|---|
+| `frc.robot` | `Main`, `Robot`, `Subsystems`, `Controls`, `Hardware` constants |
+| `frc.robot.subsystems.drivebase` | `CommandSwerveDrivetrain` (Phoenix 6 swerve) |
+| `frc.robot.subsystems.launcher` | `LauncherSubsystem`, `TurretSubsystem`, `Flywheels`, `Hood` |
+| `frc.robot.subsystems.intake` | `IntakeSubsystem`, `IntakePivot`, `IntakeRollers` |
+| `frc.robot.subsystems.index` | `IndexerSubsystem`, `Feeder`, `Spindexer` |
+| `frc.robot.subsystems.auto` | `AutoLogic`, `AutoBuilderConfig`, `AutonomousField`, `AutoDriveRotate` |
+| `frc.robot.sensors` | `LEDSubsystem` |
+| `frc.robot.subsystems` | `VisionSubsystem` |
+| `frc.robot.sim` | `SimWrapper`, `ShowVisionOnField`, `RobotSim` (simulation wrappers) |
+| `frc.robot.util` | Utilities: `RobotType`, `GCMonitor`, `AllianceUtils`, `LimelightHelpers`, `BuildInfo`, etc. |
+| `frc.robot.generated` | `CompTunerConstants`, `AlphaTunerConstants` (Tuner X generated swerve configs) |
+
+---
+
+## Enabled subsystems
+
+Every subsystem is gated by a `boolean` flag in `Subsystems.SubsystemConstants`. The table below shows all flags as they appear in the current codebase.
+
+| Constant | Default | Subsystem |
+|---|---|---|
+| `DRIVEBASE_ENABLED` | `true` | Swerve drivetrain (`CommandSwerveDrivetrain`) |
+| `INTAKE_ROLLERS_ENABLED` | `true` | `IntakeRollers` |
+| `INTAKE_ARM_ENABLED` | `true` | `IntakePivot` |
+| `INTAKE_ENABLED` | derived | `IntakeSubsystem` (arm AND rollers) |
+| `SPINDEXER_ENABLED` | `true` | `Spindexer` |
+| `FEEDER_ENABLED` | `true` | `Feeder` |
+| `INDEXER_ENABLED` | derived | `IndexerSubsystem` (spindexer AND feeder) |
+| `FLYWHEELS_ENABLED` | `true` | `Flywheels` |
+| `HOOD_ENABLED` | `true` | `Hood` |
+| `TURRET_ENABLED` | `true` | `TurretSubsystem` |
+| `LAUNCHER_ENABLED` | derived | `LauncherSubsystem` (hood AND flywheels AND turret) |
+| `VISION_ENABLED` | `true` | `VisionSubsystem` (requires `DRIVEBASE_ENABLED`) |
+| `LEDS_ENABLED` | `true` | `LEDSubsystem` |
+
+Derived constants are computed as logical AND of their component flags — for example:
+
+```java
+public static final boolean LAUNCHER_ENABLED =
+    HOOD_ENABLED && FLYWHEELS_ENABLED && TURRET_ENABLED;
+```
+
+<Tip>
+Disabling a subsystem by flipping its flag to `false` causes `Subsystems` to assign `null` to that subsystem field. `Controls` checks for `null` at the top of each `configure*Bindings()` method and exits early, so the rest of the binding code is safely skipped.
+</Tip>
+
+---
+
+## Dual hardware configurations
+
+The codebase runs on two physical robots — an **Alpha** prototype and a **Competition** bot. The correct configuration is selected automatically at startup by reading the RoboRIO's serial number in `RobotType.java`. In simulation the type is always `SIM`.
+
+```java
+// RobotType.java — static initializer
+if (RobotBase.isSimulation()) {
+  TYPE = RobotTypesEnum.SIM;
+} else {
+  String serialNumber = RobotController.getSerialNumber();
+  if (serialNumber.equals(comp)) {   // "032B4B39"
+    TYPE = RobotTypesEnum.COMP;
+  } else if (serialNumber.equals(alpha)) {  // "032B4B88"
+    TYPE = RobotTypesEnum.ALPHA;
+  } else {
+    TYPE = RobotTypesEnum.OTHER;
+  }
+}
+```
+
+Wherever hardware differs — swerve module constants, turret PID gains, gear ratios, soft limits, and CAN bus routing — the code branches on `RobotType.isAlpha()` or `RobotType.isComp()`. See [Robot Types](/robot-types) for the full comparison.
+
+---
+
+## Explore further
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Clone the repo, build, simulate, and deploy to a RoboRIO in six steps.
+  </Card>
+  <Card title="Robot Types" icon="microchip" href="/robot-types">
+    Alpha vs Competition bot configuration — serial numbers, PID gains, gear ratios, and more.
+  </Card>
+  <Card title="Subsystems" icon="gear" href="/subsystems/drivebase">
+    Deep-dive into each subsystem: drivebase, launcher, intake, indexer, and vision.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/configuration/hardware-ids">
+    Hardware IDs, launcher constants, and live NT tuning.
+  </Card>
+</CardGroup>

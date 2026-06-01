@@ -1,0 +1,108 @@
+---
+title: "Indexer subsystem: feeder and spindexer control"
+sidebarTitle: "Indexer"
+description: "Feeder and spindexer coordination that moves fuel from the intake to the launcher, with flywheel-speed-matched handoff velocity scaling."
+---
+
+The indexer moves fuel from the intake staging area into the launcher using two motors: a **Feeder** that pushes fuel along the exit path, and a **Spindexer** that spins fuel into the feed zone. Both are wrapped by `IndexerSubsystem`, which exposes a single `runIndexer()` command used by the launching sequence.
+
+## Components
+
+### Feeder
+
+`Feeder` drives a single **TalonFX** (CAN ID `FEEDER_MOTOR_ID = 30`) on the **CANivore** bus (comp bot) or **roboRIO** bus (alpha bot) using **VelocityVoltage** control.
+
+| Parameter | Value |
+|---|---|
+| Default target RPS | 95 RPS |
+| kV | `11.28 / 92` |
+| kP | 0.5 |
+| Stator limit | 120 A |
+| Supply limit | 80 A |
+| Neutral mode | Coast |
+
+### Spindexer
+
+`Spindexer` drives a single **TalonFX** (CAN ID `SPINDEXER_MOTOR_ID = 31`) on the **roboRIO** bus using **VelocityVoltage** control.
+
+| Parameter | Value |
+|---|---|
+| Default target RPS | 70 RPS |
+| Default acceleration | 1000 rot/s² |
+| kV | `11.2 / 90.7` |
+| kP | 0.6 |
+| Stator limit | 50 A |
+| Supply limit | 30 A |
+| Neutral mode | Coast |
+
+## IndexerSubsystem API
+
+`IndexerSubsystem` exposes two variants of `runIndexer()`:
+
+### `runIndexer()` — fixed velocity
+
+Runs both motors at their default configured velocities.
+
+```java
+public Command runIndexer() {
+    return Commands.runEnd(
+            () -> {
+                feeder.runVelocity();
+                spindexerSubsystem.runVelocity();
+            },
+            () -> {
+                feeder.stopMotor();
+                spindexerSubsystem.stopMotor();
+            })
+        .withName("Run Indexer");
+}
+```
+
+### `runIndexer(DoubleSupplier flywheelRPS)` — flywheel-matched velocity
+
+Scales feeder and spindexer velocity to match the active flywheel speed for a smooth handoff. The linear equations provide proportional ramping:
+
+```java
+public Command runIndexer(DoubleSupplier flywheelRPS) {
+    return Commands.runEnd(
+        () -> {
+            // Scale feeder and spindexer from flywheel speed for smooth handoff
+            double fRPS = flywheelRPS.getAsDouble() * 1.12 + 15;
+            double sRPS = Math.min(fRPS * 1.5, 70);
+            feeder.setVelocity(fRPS);
+            spindexerSubsystem.setVelocity(sRPS);
+        },
+        () -> {
+            feeder.stopMotor();
+            spindexerSubsystem.stopMotor();
+        });
+}
+```
+
+The spindexer is capped at **70 RPS** regardless of flywheel speed to prevent over-spinning.
+
+## Launch integration
+
+The indexer is gated behind `launcherSubsystem.isAtTarget()` in the launching command chain in `Controls.java`. Fuel is not fed until flywheels, hood, and turret are all within tolerance:
+
+```java
+Commands.waitUntil(() -> s.launcherSubsystem.isAtTarget())
+    .andThen(
+        Commands.parallel(
+            s.indexerSubsystem.runIndexer(() -> s.flywheels.getTargetSpeed()),
+            Commands.runOnce(() -> ledsMode = LEDMode.LAUNCH))
+        .onlyWhile(() -> s.launcherSubsystem.isAtTarget()))
+    .repeatedly()
+```
+
+If the launcher drops out of tolerance mid-cycle (e.g. the robot is bumped), `onlyWhile()` cancels the indexer automatically and the loop waits for re-acquisition.
+
+## Controller binding
+
+| Controller | Button | Action |
+|---|---|---|
+| `indexingTestController` (port 1) | Left trigger | `whileTrue(runIndexer())` — runs at fixed default velocity |
+
+<Note>
+The indexer only instantiates if both `SPINDEXER_ENABLED` and `FEEDER_ENABLED` are true in `Subsystems.java`. `Controls.java` checks for null subsystems and logs a warning if either component is disabled, skipping all indexer bindings.
+</Note>

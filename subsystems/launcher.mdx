@@ -1,0 +1,237 @@
+---
+title: "Launcher: turret, flywheels, hood, and auto-aim"
+sidebarTitle: "Launcher"
+description: "Corner-mounted rotating turret, dual flywheels, adjustable hood, and a Newton-Raphson moving-shot solver with defense compensation."
+---
+
+The launcher consists of a rotating corner **turret** (`TurretSubsystem`), dual **flywheels** (`Flywheels`), and an adjustable **hood** (`Hood`), all coordinated by `LauncherSubsystem`. A singleton `LaunchCalculator` continuously solves for the correct hood angle, flywheel RPS, and turret angle using a Newton-Raphson time-of-flight iteration with pose-differentiated defense compensation.
+
+## Architecture
+
+```
+LauncherSubsystem
+├── TurretSubsystem    (CAN ID 23 — rotating mount)
+├── Flywheels          (CAN IDs 20, 21 — dual TalonFX)
+├── Hood               (CAN ID 22 — position-controlled TalonFX)
+└── LaunchCalculator   (singleton solver)
+```
+
+## LauncherSubsystem public API
+
+| Method | Returns | Description |
+|---|---|---|
+| `launcherAimCommand()` | `Command` | Runs every loop: calls `LaunchCalculator.getParameters()`, sets hood position and flywheel RPS, publishes NT goals |
+| `isAtTarget()` | `boolean` | Returns true when flywheel + hood + turret are at target AND safety gates pass |
+| `rawStowCommand()` | `Command` | Sets hood to 0, stops flywheels |
+| `zeroSubsystemCommand()` | `Command` | Delegates to `hood.zeroHoodCommand()` |
+
+### `launcherAimCommand()` internals
+
+```java
+public Command launcherAimCommand() {
+    return Commands.run(
+            () -> {
+                LaunchingParameters para =
+                    LaunchCalculator.getInstance()
+                        .getParameters(s.drivebaseSubsystem, s.turretSubsystem);
+                this.launchParameters = para;
+                hoodGoal = para.targetHood();
+                flywheelsGoal = para.targetFlywheels();
+
+                hoodGoalPub.set(hoodGoal);
+                flywheelGoalPub.set(flywheelsGoal);
+
+                s.hood.setHoodPosition(hoodGoal);
+                s.flywheels.setVelocityRPS(flywheelsGoal);
+            })
+        .withName("Launcher Aim Command");
+}
+```
+
+### `isAtTarget()` gates
+
+All five conditions must be simultaneously true:
+
+1. **`flywheelAtTarget`** — within `FLYWHEEL_TOLERANCE` (10 RPS) of goal; tolerance widens to 30 RPS beyond 6 m
+2. **`hoodAtTarget`** — within 0.23 motor rotations of goal, and driver station is enabled
+3. **`turretAtTarget`** — within dynamic tolerance clamped between 4° and 20°, derived from `atan(0.3 / distToHub)`
+4. **`notUnderClimb`** — `LaunchCalculator.isUnderClimb()` returns false
+5. **`notGoingToBeUnderTrench`** — `LaunchCalculator.isApproachingTrench()` returns false
+
+<Note>
+All five gate booleans are published to NetworkTables for debugging:
+
+- `/AutoAim/hoodGoal` — current hood setpoint (motor rotations)
+- `/AutoAim/flywheelGoal` — current flywheel setpoint (RPS)
+- `/AutoAim/hoodAtTarget` — hood within tolerance
+- `/AutoAim/turretAtTarget` — turret within tolerance
+- `/AutoAim/flywheelAtTarget` — flywheels within tolerance
+- `/AutoAim/NotUnderClimb` — climb safety gate
+- `/AutoAim/NotUnderTrench` — trench safety gate
+</Note>
+
+---
+
+## TurretSubsystem
+
+A single **TalonFX** (CAN ID `TURRET_MOTOR_ID = 23`) through a gear reduction, with a **hall-effect sensor** (analog input `HALL_EFFECT_SENSOR_ID = 0`) for homing.
+
+### Constants
+
+| Parameter | Comp bot | Alpha bot |
+|---|---|---|
+| kP | 200 | 25 |
+| kD | 2 | 0 |
+| kS | 0.65 | 0.41 |
+| Gear ratio | 40 | 24 |
+| `TURRET_MAX` | 350° | 190° |
+| `TURRET_MIN` | -90° | 0° |
+| `TURRET_DEGREE_TOLERANCE` | 10° | 10° |
+| Stator limit | 40 A | 40 A |
+
+### Public API
+
+| Method | Description |
+|---|---|
+| `setTurretPosition(double pos)` | `runOnce` — sets `PositionVoltage` request to `pos` (rotations), runs once |
+| `rotateToTargetWithCalc()` | Default command — calls `LaunchCalculator.getParameters()` every loop for continuous SOTM targeting |
+| `pointFacingJoystick(xSupplier, ySupplier)` | Manual aiming — maps joystick angle to turret position relative to robot and field heading |
+| `zeroTurret()` | `runOnce` — sets encoder to 0 |
+| `getTurretPosition()` | Returns current position in rotations |
+| `atTarget()` | Within `TURRET_DEGREE_TOLERANCE` (10°) of target |
+| `atTarget(DoubleSupplier)` | Within a supplied tolerance (radians, converted to rotations) |
+| `brakeTurret()` | Switch neutral mode to `Brake` |
+| `coastTurret()` | Switch neutral mode to `Coast` |
+| `getOmega()` | Returns angular velocity in rad/s |
+
+### `rotateToTargetWithCalc()` — shoot-on-the-move
+
+The default turret command solves for the best reachable target degree within soft limits, normalizing across ±360° candidates:
+
+```java
+double[] candidates = {
+    normalizedTarget, normalizedTarget + 360, normalizedTarget - 360,
+};
+
+double finalTarget = /* best in-range candidate */;
+setTurretRawPosition(Units.degreesToRotations(finalTarget), -FFV);
+```
+
+The velocity feedforward (`-FFV`) cancels the turret angular velocity required to track a moving robot.
+
+<Warning>
+Driver **Y button** toggles `turretKillActive`. When active, the turret holds its current position and the auto-rotate drive mode is also disabled. A second press re-enables shoot-on-the-move. The NT topic `/SmartDashboard/Turret/Position` shows the current position in rotations during debugging.
+</Warning>
+
+---
+
+## Flywheels
+
+Two **TalonFX** motors (CAN IDs `FLYWHEEL_ONE_ID = 20`, `FLYWHEEL_TWO_ID = 21`) running **VelocityTorqueCurrentFOC**.
+
+| Parameter | Value |
+|---|---|
+| kP | 10 (comp) / 5 (alpha) |
+| kS | 5.0 |
+| kA | 0.5 |
+| Supply limit | 80 A |
+| Stator limit | 80 A |
+| `FLYWHEEL_TOLERANCE` | 10 RPS |
+| Neutral mode | Coast |
+
+### Key methods
+
+| Method | Description |
+|---|---|
+| `setVelocityRPS(double rps)` | Applies `VelocityTorqueCurrentFOC` to both flywheels |
+| `atTargetVelocity(double targetRPS, double toleranceRPS)` | Returns true when flywheel 1 is within tolerance |
+| `stop()` | Stops both motors |
+| `isOutOfFuel()` | Detects a velocity dip and debounced recovery — used for fuel count estimation |
+
+---
+
+## Hood
+
+A single **TalonFX** (CAN ID `HOOD_MOTOR_ID = 22`) with **PositionVoltage** control. The hall-effect sensor (`HALL_EFFECT_SENSOR_ID = 0`) on the analog input is used for homing.
+
+| Parameter | Value |
+|---|---|
+| kP (real) | 10 |
+| kD (real) | 0.2 |
+| kS (real) | 0.155 |
+| Forward soft limit | 9 motor rotations |
+| Reverse soft limit | -0.01224 motor rotations |
+| `TARGET_TOLERANCE` | 0.23 motor rotations |
+| `AUTO_ZERO_VOLTAGE` | -1.5 V |
+| Stator limit | 30 A |
+| Neutral mode | Brake |
+
+### Key methods
+
+| Method | Description |
+|---|---|
+| `setHoodPosition(double positionRotations)` | Issues `PositionVoltage` request |
+| `autoZeroCommand()` | Drives hood at -1.5 V to hard stop, then zeros encoder |
+| `zeroHoodCommand()` | Sets encoder to 0 and marks `hoodZeroed = true` |
+| `atTargetPosition()` | True when within `TARGET_TOLERANCE` and driver station enabled |
+| `isHoodZeroed()` | Returns `hoodZeroed` flag |
+
+---
+
+## LaunchCalculator
+
+A **singleton** (`LaunchCalculator.getInstance()`) that computes `LaunchingParameters` every loop, with aggressive caching to avoid re-solving when the robot has not moved significantly.
+
+### LaunchingParameters record
+
+```java
+public record LaunchingParameters(
+    double targetHood,          // motor rotations for hood
+    Rotation2d targetTurret,    // field-relative angle for turret
+    double targetFlywheels,     // RPS for flywheels
+    double targetTurretFeedforward, // angular velocity feedforward (rad/s)
+    Pose2d turretPose           // estimated turret pose at launch time
+) {}
+```
+
+### Caching / throttling
+
+The cache is preserved (and returned immediately) if all of the following are true:
+
+- Pose has not moved more than **1 inch**
+- Heading has not changed more than **0.5°**
+- Chassis speed is below 0.5 in/s on both axes and 0.5°/s rotationally
+- Turret angular velocity change is below **0.05 rad/s**
+- Filtered linear acceleration is below **0.3 m/s²**
+- Filtered angular acceleration is below **0.5 rad/s²**
+
+### Moving-shot solver
+
+<Steps>
+  <Step title="Defense/push compensation">
+    Pose-differentiated velocity (Lie-algebra `Twist2d` log) is blended with wheel speeds. The blend weight scales from `POSE_VELOCITY_BLEND = 0.9` at `MIN_POSE_DT = 5 ms` down to 0 at `MAX_POSE_DT = 50 ms`. When the robot is stationary (wheel speed < 0.05 m/s) pose-diff is disabled entirely to suppress estimator noise.
+  </Step>
+  <Step title="Phase delay prediction">
+    Robot state is advanced by `PHASE_DELAY = 20 ms` using second-order kinematics: `x = x₀ + v·t + ½a·t²`. The velocity at the end of the phase delay (`launchSpeeds`) is treated as constant for all subsequent calculations — post-launch acceleration does not affect the ball.
+  </Step>
+  <Step title="Newton-Raphson TOF convergence">
+    Up to **5 iterations** of Newton's method converge on the true time-of-flight accounting for robot velocity. Each iteration adjusts the distance estimate using:
+
+    ```
+    trueDistanceX = distanceX - turretVelocityX * t
+    trueDistanceY = distanceY - turretVelocityY * t
+    t_new = t - f / f'
+    ```
+
+    Convergence is declared when `|t_new - t_prev| < 0.001 s`.
+  </Step>
+  <Step title="Lookup table interpolation">
+    `LauncherConstants` holds an `InterpolatingDoubleTreeMap` for flywheel RPS, hood angle, and time-of-flight vs. distance, populated from `compDistanceData` (12 points from 1 m to 8 m).
+  </Step>
+</Steps>
+
+### Safety gates
+
+`isApproachingTrench(Pose2d, ChassisSpeeds)` samples **10 lookahead poses** over **0.5 seconds** at the current velocity. If any sample places the turret within ±12 in (X) × ±25 in (Y) of a trench AprilTag (IDs 1, 6, 7, 12, 17, 22, 23, 28), the hood is forced to 0 and `isAtTarget()` returns false.
+
+`isUnderClimb(Pose2d turretPose)` checks whether the turret is within the climb structure envelope (±23.5 in X × ±11.38 in Y of tags 15 or 31). If true, `isAtTarget()` returns false.

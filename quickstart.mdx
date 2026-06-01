@@ -1,47 +1,160 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: "Get started with REBUILT 2026 robot code"
+sidebarTitle: "Quickstart"
+description: "Clone, build, simulate, and deploy the REBUILT 2026 codebase to a RoboRIO in six steps — including build variants and DataLog setup."
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
+This quickstart walks you through obtaining the REBUILT 2026 source code, building it locally, running it in the WPILib simulator, and deploying it to a physical RoboRIO. It also covers the optional Gradle build properties and what to verify on SmartDashboard after a successful deploy.
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+---
 
 ## Prerequisites
 
-Before you begin, you must have:
+Before you begin, make sure the following are installed and available on your development machine.
 
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
+| Requirement | Notes |
+|---|---|
+| **JDK 17** | WPILib bundles its own JDK; alternatively use any JDK 17 distribution |
+| **WPILib 2026** | Install via the WPILib installer — provides Gradle toolchains, VS Code extension, and simulation GUI |
+| **VS Code with WPILib extension** | Recommended IDE; the extension adds build/deploy/simulate commands to the command palette |
+| **RoboRIO with 2026 firmware** | Required for on-robot deployment; team number must be 2412 (or match `.wpilib/wpilib_preferences.json`) |
 
-## Get started
+<Note>
+If you only want to build or simulate locally, you do not need a physical RoboRIO. The WPILib simulation GUI (`simgui`) launches automatically when you run `simulateJava`.
+</Note>
+
+---
+
+## Steps
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
 
-    ```bash
-    npm install your-package
-    ```
-  </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
+### Clone the repository
 
-    ```bash
-    your-cli init
-    ```
-  </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+```bash
+git clone https://github.com/robototes/REBUILT2026.git
+cd REBUILT2026
+```
 
-    ```bash
-    your-cli start
-    ```
-  </Step>
+The repository root contains `build.gradle`, vendor dependencies in `vendordeps/`, deploy assets in `src/main/deploy/`, and the WPILib project metadata in `.wpilib/wpilib_preferences.json` (team number **2412**, year **2026**).
+
+### Open in VS Code with the WPILib extension
+
+Open the cloned folder in VS Code. The WPILib extension detects the GradleRIO project automatically and populates the WPILib command palette (Ctrl+Shift+P → "WPILib:").
+
+Alternatively, import the project into any IDE that supports Gradle by pointing it at the root `build.gradle`. The project uses `sourceCompatibility = JavaVersion.VERSION_17`.
+
+### Build the project
+
+```bash
+./gradlew build
+```
+
+This compiles all Java sources under `src/main/java/`, runs the `generateBuildInfo` task (which writes a `build-info.txt` file with the current git hash, branch, and commit message into `src/main/deploy/`), and packages everything into a fat JAR via the `jar` task. Vendor library JNI binaries are bundled into the JAR so it is self-contained for deployment.
+
+The default main class is `frc.robot.Main`. Passing `-PautomatedTest=true` switches it to `frc.robot.test.AutomatedTestMain` (see [Build variants](#build-variants) below).
+
+<CodeGroup>
+```bash Standard build
+./gradlew build
+```
+```bash Build with automated test entry point
+./gradlew build -PautomatedTest=true
+```
+```bash Build with high-fidelity vision enabled
+./gradlew build -PhighFidelityVision=true
+```
+</CodeGroup>
+
+### Run the simulation
+
+```bash
+./gradlew simulateJava
+```
+
+The simulation task launches the robot code in a desktop JVM with `-Xmx2G -Xms2G` heap settings (configured in `build.gradle`). The WPILib simulation GUI (`simgui`) opens automatically because `wpi.sim.addGui().defaultEnabled = true` is set in the build file. A virtual DriverStation window is also available via `wpi.sim.addDriverstation()`.
+
+In simulation, `RobotType.TYPE` is always `RobotTypesEnum.SIM` and `Robot.isSimulation()` returns `true`. The `SimWrapper` is instantiated and `simulationInit()` automatically zeros the hood (`subsystems.hood.zero()`).
+
+During simulation you can inject odometry drift (POV-right on the driver controller) or reset the robot to the selected auto start pose (POV-left) to test vision correction behavior.
+
+<Note>
+High-fidelity vision simulation can be enabled by passing `-PhighFidelityVision=true` to the simulate task. The `highFidelityVision` system property is forwarded to the JVM automatically.
+</Note>
+
+```bash
+./gradlew simulateJava -PhighFidelityVision=true
+```
+
+### Deploy to the RoboRIO
+
+```bash
+./gradlew deploy
+```
+
+GradleRIO reads the team number from `.wpilib/wpilib_preferences.json` (`"teamNumber": 2412`) and connects to the RoboRIO over USB or the team's network (10.24.12.x). It uploads the fat JAR as an `FRCJavaArtifact` and deploys static files from `src/main/deploy/` to `/home/lvuser/deploy/` on the RoboRIO.
+
+Alternatively, use the VS Code command palette: **WPILib: Deploy Robot Code**.
+
+<Warning>
+The RoboRIO must be running 2026 firmware and must be reachable on the network before deploying. If the deploy fails, verify the USB or radio connection and confirm the team number in `.wpilib/wpilib_preferences.json` matches your RoboRIO's configured team number.
+</Warning>
+
+### Verify on SmartDashboard or Shuffleboard
+
+After enabling the robot for the first time, confirm these entries are present and updating:
+
+| Entry | What it confirms |
+|---|---|
+| `CommandScheduler` (SmartDashboard) | Scheduler is running; shows active/scheduled commands |
+| `GCCount` (SmartDashboard) | JVM garbage-collection monitor is active |
+| `Field` (Shuffleboard Field2d) | Drivetrain odometry and autonomous path preview are working |
+| `/vision/limelight-a_Last timestamp` | Limelight A is online and sending heartbeats |
+| `/Turret/Position` | Turret motor is responding |
+
 </Steps>
 
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
+---
 
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>
+## Build variants
+
+Two Gradle project properties change what gets compiled or how the simulation runs.
+
+| Property | Default | Effect |
+|---|---|---|
+| `-PautomatedTest=true` | `false` | Switches the JAR main class to `frc.robot.test.AutomatedTestMain` for CI/hardware-in-the-loop test runs |
+| `-PhighFidelityVision=true` | `false` | Passes the `highFidelityVision` system property into the simulation JVM, enabling additional vision simulation fidelity |
+
+```bash
+# Run automated tests
+./gradlew simulateJava -PautomatedTest=true
+
+# Deploy with high-fidelity vision build flag (simulation only — no effect on RoboRIO deploy)
+./gradlew simulateJava -PhighFidelityVision=true
+```
+
+---
+
+## DataLog
+
+On a real robot, `DataLogManager` starts automatically in the `Robot` constructor:
+
+```java
+if (RobotBase.isReal()) {
+  DataLogManager.start("", "", DATA_LOG_FLUSH_PERIOD_S); // 14 Hz flush (1/14 s)
+  DriverStation.startDataLog(DataLogManager.getLog(), true);
+}
+```
+
+Logs are flushed at **14 Hz** (`DATA_LOG_FLUSH_PERIOD_S = 1.0 / 14.0`). The DataLog is also resumed every second in `robotPeriodic()` to recover from any transient pauses. Struct schemas for `Pose2d`, `Pose3d`, `ChassisSpeeds`, `SwerveModuleState`, and `SwerveModulePosition` are explicitly registered so log viewers (e.g., Advantage Scope) can decode them.
+
+Command lifecycle events (initialize, interrupt, finish) are also logged automatically via `CommandScheduler` callbacks:
+
+```java
+CommandScheduler.getInstance()
+    .onCommandInitialize(cmd -> DataLogManager.log("Command initialized: " + cmd.getName()));
+```
+
+<Note>
+Before enabling the robot for a match or tuning session, zero the hood and turret using the **Start** button on the driver controller. The `disabledExit()` callback will warn via `DriverStation.reportWarning` if the hood has not been zeroed when exiting disabled mode.
+</Note>

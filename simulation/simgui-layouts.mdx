@@ -1,0 +1,78 @@
+---
+title: "SimGUI layouts for WPILib simulation"
+sidebarTitle: "SimGUI Layouts"
+description: "Pre-configured WPILib Simulation GUI window layouts stored in Simgui_layouts/. Copy the desired layout to the project root before launching the simulator."
+---
+
+The repo ships pre-configured WPILib Simulation GUI layouts in `Simgui_layouts/`. Each subfolder is a self-contained template: copy its `simgui.json` (and any image assets) to the **project root** before launching the simulator, and the GUI will load the layout automatically on startup.
+
+## Available layouts
+
+| Folder | Description |
+|---|---|
+| `Simgui_layouts/VisionSim/` | Visualizes ground-truth pose vs. vision-estimated pose and shows per-camera AprilTag detection wireframes on the Field2d widget |
+
+## How to use a layout
+
+<Steps>
+  <Step title="Pick a layout subfolder">
+    Browse the `Simgui_layouts/` directory and choose the layout that matches what you want to test. For vision debugging, use `Simgui_layouts/VisionSim/`.
+  </Step>
+
+  <Step title="Copy files to the project root">
+    Copy `simgui.json` **and all image files** from the chosen subfolder into the repository root (the same directory that contains `build.gradle`):
+
+    ```bash
+    # From the repository root — copy the VisionSim layout
+    cp Simgui_layouts/VisionSim/simgui.json .
+    cp Simgui_layouts/VisionSim/*.png .
+    ```
+
+    The VisionSim layout ships with three image assets used as icons on the Field2d widget:
+
+    | File | Purpose |
+    |---|---|
+    | `swerve_module.png` | Icon for each of the four simulated swerve modules |
+    | `tag-blue.png` | Marker for AprilTags visible to the simulated cameras |
+    | `tag-green.png` | Marker for other AprilTag field positions |
+  </Step>
+
+  <Step title="Run the simulator">
+    Launch the simulator — the GUI reads `simgui.json` from the project root automatically:
+
+    ```bash
+    ./gradlew simulateJava
+    ```
+
+    All widget positions, sizes, and data source paths defined in `simgui.json` are restored immediately when the GUI opens.
+  </Step>
+</Steps>
+
+<Note>
+  The root-level `simgui.json` is listed in `.gitignore`. Your local working copy will never be committed. The canonical, checked-in copies always live inside the `Simgui_layouts/` subfolders — those are the templates you copy from. This means each developer can freely modify their local layout without affecting teammates.
+</Note>
+
+## VisionSim layout
+
+The `VisionSim` layout is designed to let you verify the full PhotonVision → Limelight conversion pipeline at a glance. The Field2d widget is pre-wired to display:
+
+| Field2d object | What it shows |
+|---|---|
+| `EstimatedRobot` | Where the robot *thinks* it is (odometry + vision correction) |
+| `EstimatedRobotModules` | The four swerve modules at their computed positions and steering angles |
+| `GroundTruthRobot` | Where the robot *actually* is in the physics simulation |
+| `Vision_limelight-a_MT1` | MegaTag1 pose estimate from camera A |
+| `Vision_limelight-a_MT2` | MegaTag2 pose estimate from camera A |
+| `Vision_limelight-b_MT1` | MegaTag1 pose estimate from camera B |
+| `Vision_limelight-b_MT2` | MegaTag2 pose estimate from camera B |
+| `Vision_limelight-c_MT1` | MegaTag1 pose estimate from camera C |
+| `Vision_limelight-c_MT2` | MegaTag2 pose estimate from camera C |
+
+Vision estimate objects disappear from the field automatically when no AprilTags are visible to that camera (the object's poses list is cleared).
+
+To stress-test vision correction, use the D-pad on the driver controller (active **only in simulation**):
+
+- **POV-right** — injects 0.5 m translation drift and ±15° heading drift into the pose estimator. The ground-truth pose does not change; watch the estimated pose jump away from the ground truth and then converge back as vision corrections arrive.
+- **POV-left** — cycles through four preset reset positions (auto start on correct alliance side, auto start on wrong alliance side, field origin on correct side, field origin on wrong side).
+
+For more details on the full simulation architecture see [Simulation Overview](/simulation/overview), and for the vision pipeline internals see [Vision Sim](/simulation/vision-sim).

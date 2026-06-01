@@ -1,0 +1,120 @@
+---
+title: "LED subsystem: CANdle-driven status lighting"
+sidebarTitle: "LEDs"
+description: "CTRE CANdle status lighting with solid, alternating, and rainbow animation patterns tied to robot state, plus a configurable flash command."
+---
+
+`LEDSubsystem` drives a CTRE **CANdle** (CAN ID `CANDLE_ID = 40`) to communicate robot state to drivers and human players via color and animation. All LED output runs through three internal patterns: `SOLID`, `ALTERNATE`, and `RAINBOW`.
+
+## LED modes
+
+| Mode | Color | R, G, B | Pattern | Trigger condition |
+|---|---|---|---|---|
+| `DEFAULT` | Purple | 255, 0, 255 | Solid | Default teleop state |
+| `INTAKE` | Blue | 0, 0, 255 | Solid | Left trigger held (intaking) |
+| `LAUNCHING` | Yellow ↔ Red | 255, 255, 0 / 255, 0, 0 | Alternating (0.25 s interval) | Right trigger held, spinning up |
+| `LAUNCH` | Green | 0, 255, 0 | Solid | Launcher at target, feeding |
+| `CLIMB` | Orange | 255, 128, 0 | Solid | Climb mode active |
+| `RAINBOW` | Rainbow | — | Rainbow animation | Autonomous mode |
+| `DISABLED` | Off | 0, 0, 0 | Solid | Robot disabled |
+
+<Note>
+The CANdle controls a strip of **200 LEDs** (`END_INDEX = 200`). The `SolidColor` controller and `RainbowAnimation` both address the full range from index 0 to 199.
+</Note>
+
+## Pattern types
+
+`LEDPattern` is an internal enum with three variants:
+
+<CardGroup cols={3}>
+  <Card title="SOLID" icon="circle">
+    Applies a single `RGBWColor` to all LEDs via a `SolidColor` control request. Used for `DEFAULT`, `INTAKE`, `LAUNCH`, `CLIMB`, and `DISABLED`.
+  </Card>
+  <Card title="ALTERNATE" icon="arrows-left-right">
+    Toggles between two colors (`primaryColor` and `secondaryColor`) on a configurable interval. Currently used by `LAUNCHING` (yellow ↔ red, 0.25 s). The toggle runs in `periodic()`.
+  </Card>
+  <Card title="RAINBOW" icon="rainbow">
+    Issues a `RainbowAnimation` request to the CANdle at **100 Hz** frame rate, full brightness (`1.0`), forward direction. Used during autonomous.
+  </Card>
+</CardGroup>
+
+## Rainbow animation configuration
+
+```java
+rainbowAnimation
+    .withBrightness(1.0)
+    .withDirection(AnimationDirectionValue.Forward)
+    .withFrameRate(Units.Hertz.of(100));
+```
+
+The animation object is created once at construction and applied via `candle.setControl(rainbowAnimation)`.
+
+## setMode
+
+`setMode(LEDMode mode)` is idempotent — it exits early if the requested mode matches the current mode:
+
+```java
+public void setMode(LEDMode mode) {
+    if (mode == currentMode) return;
+    currentMode = mode;
+    switch (mode) {
+        case INTAKE    -> setSolid(INTAKE_COLOR);
+        case CLIMB     -> setSolid(CLIMB_COLOR);
+        case DEFAULT   -> setSolid(DEFAULT_COLOR);
+        case LAUNCH    -> setSolid(LAUNCH_COLOR);
+        case LAUNCHING -> setAlternating(LAUNCH_PREP_COLOR, LAUNCH_PREP_COLOR_TWO, 0.25);
+        case DISABLED  -> setSolid(OFF);
+        case RAINBOW   -> setRainbow();
+    }
+    publishState();
+}
+```
+
+## flashCommand
+
+`flashCommand(RGBWColor color, int times, double interval)` returns a `Command` that blinks the LEDs `times` times at the given `interval` (seconds per half-cycle), then restores the previous mode:
+
+```java
+public Command flashCommand(RGBWColor color, int times, double interval) {
+    return Commands.sequence(
+            Commands.repeatingSequence(
+                    Commands.runOnce(() -> setHardwareColor(color)),
+                    Commands.waitSeconds(interval),
+                    Commands.runOnce(() -> setHardwareColor(OFF)),
+                    Commands.waitSeconds(interval))
+                .withTimeout(times * interval * 2),
+            Commands.runOnce(() -> {
+                LEDMode saved = currentMode;
+                currentMode = null;
+                setMode(saved);
+            }))
+        .withName("Flash LEDs");
+}
+```
+
+`Controls.java` uses this to flash **orange** 30 times at 0.1 s on a `readyToShoot` falling edge, and **green** 3 times at 0.2 s on the zero-subsystems start button.
+
+## Disabled behavior
+
+`periodic()` checks `RobotState.isDisabled()` each cycle. When disabled, it forces `setMode(LEDMode.DISABLED)` — turning all LEDs off — regardless of the last teleop mode. When the robot re-enables, the `ledsMode` field in `Controls.java` restores the appropriate mode on the next periodic cycle.
+
+## NetworkTables topics
+
+| Topic | Type | Description |
+|---|---|---|
+| `/color/currentMode` | String | Name of the active `LEDMode` |
+| `/color/currentPattern` | String | Name of the active `LEDPattern` |
+| `/color/currentColor` | String | Hex color string (solid patterns only) |
+| `/color/alternatingColors` | String | `"A:#rrggbb | B:#rrggbb"` (alternate pattern only) |
+
+## Trigger conditions from Controls.java
+
+| Driver input | LED effect |
+|---|---|
+| Left trigger (hold) | `INTAKE` (blue) |
+| Right trigger (hold) — spinning up | `LAUNCHING` (yellow ↔ red alternating) |
+| Right trigger (hold) — at target | `LAUNCH` (green) |
+| Start button (zero) | Flash green 3× |
+| `readyToShoot` falling edge | Flash orange 30× |
+| Robot disabled | `DISABLED` (off) |
+| Default teleop | `DEFAULT` (purple) |

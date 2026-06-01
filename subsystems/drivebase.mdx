@@ -1,0 +1,116 @@
+---
+title: "Swerve drivetrain: field-centric Phoenix 6 swerve"
+sidebarTitle: "Drivebase"
+description: "Phoenix 6 CANivore swerve drivetrain with field-centric drive, WPILib pose estimation, three SysId characterization routines, and hardware simulation."
+---
+
+`CommandSwerveDrivetrain` extends the Phoenix 6 `TunerSwerveDrivetrain` (which itself extends `SwerveDrivetrain<TalonFX, TalonFX, CANcoder>`) and implements WPILib's `Subsystem` interface so it participates in the command scheduler. All hardware is constructed inside the drivetrain class—callers never instantiate motors or encoders directly.
+
+## Architecture
+
+```
+SwerveDrivetrain<TalonFX, TalonFX, CANcoder>  (Phoenix 6)
+    └── TunerSwerveDrivetrain                  (device-type binding)
+            └── CommandSwerveDrivetrain        (WPILib Subsystem + controls wiring)
+                    └── Controls.java          (wires default drive command)
+```
+
+`Controls.java` sets the default command on `drivebaseSubsystem` using `applyRequest()`:
+
+```java
+s.drivebaseSubsystem.setDefaultCommand(
+    s.drivebaseSubsystem
+        .applyRequest(
+            () ->
+                drive
+                    .withVelocityX(getDriveX())
+                    .withVelocityY(getDriveY())
+                    .withRotationalRate(getDriveRotate()))
+        .withName("Drive"));
+```
+
+## Public API
+
+| Method | Signature | Description |
+|---|---|---|
+| `applyRequest` | `Command applyRequest(Supplier<SwerveRequest>)` | Applies a `SwerveRequest` every loop tick |
+| `resetPose` | inherited | Hard-resets the pose estimator to a given `Pose2d` |
+| `addVisionMeasurement` | inherited | Fuses a vision measurement with configurable std devs |
+| `resetTranslation` | inherited | Resets only XY while preserving gyro heading |
+| `getState` | inherited | Returns the latest `SwerveDriveState` (pose, speeds, module states) |
+| `samplePoseAt` | inherited | Interpolates pose history for a given FPGA timestamp |
+| `registerTelemetry` | inherited | Registers a telemetry consumer that runs after every odometry update |
+| `seedFieldCentric` | inherited | Seeds field-centric direction to the current heading |
+| `coastMotors` | `Command coastMotors()` | Switches drive motors to coast (re-brakes on end) |
+| `isStationary` | `boolean isStationary()` | Returns true when all velocity components are near zero |
+| `isBeached` | `boolean isBeached(double pitchThreshold)` | Returns true if pitch or roll exceeds threshold |
+
+## Field-centric drive
+
+The default drive request uses `SwerveRequest.FieldCentric` with a `SWERVE_DEADBAND` of `0.001` and `DriveRequestType.Velocity`:
+
+```java
+private final SwerveRequest.FieldCentric drive =
+    new SwerveRequest.FieldCentric()
+        .withDeadband(SWERVE_DEADBAND)          // 0.001 m/s
+        .withRotationalDeadband(SWERVE_DEADBAND)
+        .withDriveRequestType(DriveRequestType.Velocity);
+```
+
+Driver joystick inputs are scaled by `MaxSpeed` (sourced from `CompTunerConstants.kSpeedAt12Volts`) and a `MaxAngularRate` of `0.75` rotations per second. A deadband of `0.1` is applied to raw joystick inputs before scaling.
+
+## Operator perspective
+
+`periodic()` checks alliance color and calls `setOperatorPerspectiveForward()` once per match to rotate the field-centric coordinate frame:
+
+- **Blue alliance** → `Rotation2d.kZero` (forward = toward red wall)
+- **Red alliance** → `Rotation2d.k180deg` (forward = toward blue wall)
+
+The flag `m_hasAppliedOperatorPerspective` prevents re-applying the rotation during an enabled match unless the robot is disabled or code restarts mid-match.
+
+```java
+DriverStation.getAlliance().ifPresent(alliance -> {
+    this.setOperatorPerspectiveForward(
+        alliance == DriverStation.Alliance.Blue
+            ? kBlueAlliancePerspectiveRotation
+            : kRedAlliancePerspectiveRotation);
+});
+```
+
+## Pose clamping
+
+`clampPoseToField()` runs every `periodic()` loop. If the pose estimator walks off the field boundary (derived from the `AprilTagFieldLayout`), the pose is hard-clamped to the nearest valid field coordinate. This prevents errant vision measurements from accumulating unbounded translations.
+
+## SysId characterization
+
+Three `SysIdRoutine` instances are available for characterizing drive gains:
+
+| Routine | Request type | Dynamic voltage |
+|---|---|---|
+| Translation | `SysIdSwerveTranslation` | 4 V |
+| Steer | `SysIdSwerveSteerGains` | 7 V |
+| Rotation | `SysIdSwerveRotation` | π rad/s ramp, π rad/s step |
+
+Run quasistatic or dynamic tests via `sysIdQuasistatic(Direction)` / `sysIdDynamic(Direction)`. The active routine is pointed to by `m_sysIdRoutineToApply` (default: translation).
+
+<Tip>
+SysId state strings are written with CTRE `SignalLogger` so they appear in the Phoenix 6 `.hoot` log alongside motor signals. Import the `.hoot` file directly into the SysId application.
+</Tip>
+
+## Simulation
+
+When `Utils.isSimulation()` is true, `startSimThread()` spawns a `Notifier` that calls `updateSimState()` every **5 ms**, faster than the 20 ms robot loop, so PID gains behave consistently in simulation:
+
+```java
+private static final double kSimLoopPeriod = 0.005; // 5 ms
+```
+
+The notifier feeds `RobotController.getBatteryVoltage()` into the simulation model for realistic brownout behavior.
+
+## CAN bus
+
+On the competition robot all swerve devices (TalonFX drive motors, TalonFX steer motors, CANcoders) are connected to the Phoenix 6 **CANivore** bus, referenced via `CompTunerConstants.kCANBus`. On the alpha robot, devices are on `CANBus.roboRIO()`.
+
+<Note>
+`Robot.java` sets the minimum brownout voltage to **7.0 V** (`RobotController.setBrownoutVoltage(7.0)`) to protect motor controllers during high-current maneuvers. The SysId translation routine deliberately caps dynamic voltage to 4 V for the same reason.
+</Note>

@@ -1,0 +1,90 @@
+{
+  "projectType": "general",
+  "projectName": "REBUILT 2026",
+  "projectDescription": "FRC Team Robototes' Java robot code for the 2026 game REBUILT, featuring a swerve drivetrain, turret-based launcher, vision-assisted pose estimation, and autonomous path planning.",
+  "theme": "aspen",
+  "primaryColor": "#1A3A5C",
+  "lightColor": "#2563EB",
+  "darkColor": "#0F2240",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "robot-types"
+            ]
+          },
+          {
+            "group": "Subsystems",
+            "pages": [
+              "subsystems/drivebase",
+              "subsystems/intake",
+              "subsystems/indexer",
+              "subsystems/launcher",
+              "subsystems/vision",
+              "subsystems/leds"
+            ]
+          },
+          {
+            "group": "Autonomous",
+            "pages": [
+              "autonomous/overview",
+              "autonomous/paths",
+              "autonomous/named-commands"
+            ]
+          },
+          {
+            "group": "Simulation",
+            "pages": [
+              "simulation/overview",
+              "simulation/vision-sim",
+              "simulation/simgui-layouts"
+            ]
+          },
+          {
+            "group": "Configuration & Tuning",
+            "pages": [
+              "configuration/hardware-ids",
+              "configuration/launcher-constants",
+              "configuration/tuner-constants",
+              "configuration/nt-tuning"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "CTRE Phoenix 6 swerve drivetrain with field-centric control",
+    "Corner turret with auto-aim using Newton-Raphson ballistic solver",
+    "Three-Limelight vision system with MegaTag2 pose estimation and defense detection",
+    "PathPlanner autonomous routing with named command integration",
+    "Dual robot support (Alpha and Competition bots) via serial-number detection",
+    "Moving-shot prediction with phase delay and acceleration compensation",
+    "Full robot simulation including vision, fuel, and ground truth physics",
+    "Networktables-based live tuning for launcher constants and vision parameters",
+    "LED feedback system with mode-aware patterns via CANdle",
+    "DataLog telemetry with 14 Hz flush and build-info stamping"
+  ],
+  "publicApiSurface": [
+    "Subsystems (constructor, SubsystemConstants flags)",
+    "CommandSwerveDrivetrain (applyRequest, resetPose, addVisionMeasurement, resetTranslation, getState, samplePoseAt, registerTelemetry)",
+    "LauncherSubsystem (launcherAimCommand, isAtTarget, rawStowCommand, zeroSubsystemCommand)",
+    "TurretSubsystem (setTurretPosition, zeroTurret, rotateToTargetWithCalc, pointFacingJoystick, getTurretPosition, atTarget, brakeTurret, coastTurret)",
+    "IntakeSubsystem (smartIntake, deployPivot, retractPivot, extakeIntake, intakeWhileLaunch, IntakeMode enum)",
+    "IndexerSubsystem (runIndexer)",
+    "VisionSubsystem (update, getLastVisionPose2d, isLimeLightOnline, getNumTargets, getTimeSinceLastReading)",
+    "LEDSubsystem (setMode, flashCommand, LEDMode enum)",
+    "AutoLogic (init, initCommandsAndPaths, initSmartDashBoard, getSelectedAuto, getSelectedAutoStartingPose, filterAutos)",
+    "LauncherConstants (getFlywheelSpeedFromDistance, getHoodAngleFromDistance, getTimeFromDistance, predictTargetPos, turretTransform)",
+    "LaunchCalculator (getInstance, getParameters, calculate, isApproachingTrench, isUnderClimb)",
+    "RobotType (isAlpha, isComp, isSim, TYPE)",
+    "NtTunableDouble / NtTunableBoolean / NtTunableInteger",
+    "Controls (configureDrivebaseBindings, configureLauncherBindings, configureIntakeBindings, MaxSpeed, MaxAngularRate)"
+  ]
+}

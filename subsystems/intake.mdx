@@ -1,0 +1,131 @@
+---
+title: "Intake subsystem: pivot arm and roller control"
+sidebarTitle: "Intake"
+description: "Pivot arm and dual-roller intake coordinated by IntakeSubsystem, with speed-scaled smart intake, oscillation during launch, and auto-zeroing."
+---
+
+The intake consists of two cooperating sub-components: `IntakePivot` (a single TalonFX controlling a 35:1 arm) and `IntakeRollers` (two TalonFXs running velocity torque-current FOC). `IntakeSubsystem` coordinates them and exposes the high-level commands consumed by `Controls.java`.
+
+## IntakeMode states
+
+`IntakeSubsystem` uses an internal `IntakeMode` enum to select behavior each loop. `Controls.java` writes to the static `intakeMode` field in response to driver button presses.
+
+<Tabs>
+  <Tab title="DEPLOYED">
+    Moves the pivot to `DEPLOYED_POS` (-0.43 rotations) and stops the rollers. Used when the robot is ready to pick up fuel but has not yet started intaking.
+  </Tab>
+  <Tab title="RETRACTED">
+    Moves the pivot to `RETRACTED_POS` (0.0 rotations — hard stop) and stops the rollers. Safe transport position.
+  </Tab>
+  <Tab title="SPIN">
+    Runs rollers at `TARGET_RPS` (68 RPS) while holding the current pivot position. Used for secondary spin-up scenarios.
+  </Tab>
+  <Tab title="LAUNCH">
+    Calls `intakeWhileLaunch()` — oscillates the pivot between `LAUNCH_POS_OUT` (-0.292) and `LAUNCH_POS_IN` (-0.13) using a cosine waveform over a 0.5-second period, while running rollers at `AGITATE_RPS` (34 RPS) to prevent jams during shooting.
+  </Tab>
+  <Tab title="INTAKE">
+    Calls `smartIntake()` with the current drivebase `ChassisSpeeds`. Ensures the pivot is at `DEPLOYED_POS` before spinning rollers. Roller speed is scaled from chassis speed (see below).
+  </Tab>
+  <Tab title="EXTAKE">
+    Moves pivot to `EXTAKE_POS` (-0.3 rotations) and spins rollers in reverse at `-TARGET_RPS` to reject misloaded fuel.
+  </Tab>
+</Tabs>
+
+## Smart intake speed scaling
+
+`smartIntake(Supplier<ChassisSpeeds>)` scales roller RPS linearly from chassis translational speed to reduce spilling at high drive speeds:
+
+```java
+public void smartIntake(Supplier<ChassisSpeeds> speeds) {
+    if (!intakePivot.isAtTarget(5, IntakePivot.DEPLOYED_POS)) {
+        deployPivot();
+    }
+    var s = speeds.get();
+    runRollers(() -> Math.hypot(s.vxMetersPerSecond, s.vyMetersPerSecond) * 6 + 50);
+}
+```
+
+At rest the rollers spin at **50 RPS**; at maximum drive speed the multiplier adds up to ~+30 RPS on top, keeping fuel from bouncing back out.
+
+## Public API
+
+| Method | Description |
+|---|---|
+| `smartIntake(Supplier<ChassisSpeeds>)` | Deploy pivot then run rollers scaled to drive speed |
+| `deployPivot()` | Move pivot to `DEPLOYED_POS`, stop rollers |
+| `retractPivot()` | Move pivot to `RETRACTED_POS`, stop rollers |
+| `extakeIntake()` | Move pivot to `EXTAKE_POS`, reverse rollers |
+| `intakeWhileLaunch()` | Oscillate pivot + agitate rollers during shooting |
+| `runRollers()` | Run rollers at `TARGET_RPS` (68 RPS) |
+| `runRollers(DoubleSupplier)` | Run rollers at a supplied RPS |
+
+## IntakePivot
+
+`IntakePivot` drives a single **TalonFX** (CAN ID `INTAKE_PIVOT_MOTOR_ID = 15`) through a **35:1** gear reduction using **MotionMagic** position control with arm-cosine gravity compensation.
+
+### Key positions
+
+| Constant | Value (rotations) | Description |
+|---|---|---|
+| `RETRACTED_POS` | `0.0` | Zero / home position |
+| `DEPLOYED_POS` | `-0.43` | Fully lowered for intaking |
+| `EXTAKE_POS` | `-0.3` | Partial deploy for ejection |
+| `LAUNCH_POS_OUT` | `-0.292` | Outer oscillation point during launch |
+| `LAUNCH_POS_IN` | `-0.13` | Inner oscillation point during launch |
+
+### MotionMagic tuning
+
+| Parameter | Value |
+|---|---|
+| kP | 40 |
+| kD | 1 |
+| kG (arm cosine) | 0.4 |
+| kS | 0.2 |
+| Cruise velocity | 100 rot/s |
+| Acceleration | 400 rot/s² |
+
+### Auto-zero sequence
+
+```java
+public Command autoZeroCommand() {
+    return Commands.sequence(
+            voltageControl(() -> Volts.of(AUTO_ZERO_VOLTAGE))  // 8 V drive upward
+                .withDeadline(
+                    Commands.waitSeconds(0.5)
+                        .andThen(
+                            Commands.run(() -> SS_intakePivotCurrent.refresh())
+                                .until(
+                                    () -> SS_intakePivotCurrent.getValueAsDouble()
+                                           >= (STATOR_CURRENT_LIMIT - 1)))),  // stall at 59 A
+            zeroPivot())
+        .withTimeout(3)
+        .withName("Automatic Zero Pivot");
+}
+```
+
+<Note>
+The pivot zero is performed at startup by `Controls.java` (driver **Start** button while disabled). `autoZeroCommand()` drives the arm toward the hard stop at 8 V, waits for stator current to hit the stall limit (59 A), then calls `zeroPivot()` to set the encoder to 0. In simulation, `autoZeroCommand()` falls back to `zeroPivot()` immediately.
+</Note>
+
+## IntakeRollers
+
+Two **TalonFX** motors drive the rollers via **VelocityTorqueCurrentFOC**:
+
+| Constant | Value | CAN ID |
+|---|---|---|
+| Left roller | `INTAKE_MOTOR_ONE_ID` | 16 |
+| Right roller | `INTAKE_MOTOR_TWO_ID` | 17 |
+| `TARGET_RPS` | 68 RPS | — |
+| `AGITATE_RPS` | 34 RPS (`TARGET_RPS / 2`) | — |
+
+The left roller runs on the **CANivore** bus (comp bot) while the right roller uses the **roboRIO** bus. Motors run in **Coast** neutral mode to prevent fuel damage on sudden stops.
+
+## Controller bindings
+
+| Button | Action |
+|---|---|
+| Left trigger (hold) | `INTAKE` mode — smart intake with chassis speed scaling |
+| Left bumper (hold) | `EXTAKE` mode — reverse rollers, partial deploy |
+| POV Up | `DEPLOYED` mode — deploy pivot, stop rollers |
+| POV Down | `RETRACTED` mode — retract pivot, stop rollers |
+| Right trigger (hold) | Transitions intake to `LAUNCH` mode via `updateIntakeMode()` once launcher is at target |

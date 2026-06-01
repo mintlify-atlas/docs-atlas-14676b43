@@ -1,0 +1,116 @@
+---
+title: "PathPlanner paths and autonomous routines"
+sidebarTitle: "Paths"
+description: "All twelve REBUILT 2026 autonomous routines covering left trench, right trench, center, and blocking strategies — powered by PathPlanner."
+---
+
+Twelve autonomous routines are available in REBUILT 2026, covering left trench, right trench, center, and blocking strategies. All routines are authored in PathPlanner's `.auto` format, stored under `src/main/deploy/pathplanner/autos/`, and loaded at runtime by `AutoLogic` using `AutoBuilder.buildAuto(autoName)`.
+
+## Registered auto routines
+
+The table below lists every path registered in `AutoLogic.initPaths()`. The **path name** is the string key used in code and in the `.auto` filename; the **display name** is what appears in the SmartDashboard chooser. All twelve routines have `resetOdom: true` and belong to the `COMP` folder in PathPlanner — except `Rotate-RT-Neutral`, which is in the `WIP` folder.
+
+| Path Name | Display Name | Start Zone | Folder |
+|---|---|---|---|
+| `C-Outpost-Depot` | C-Outpost-Depot | Center | COMP |
+| `LeftTrench-Depot` | LeftTrench-Depot | Left Trench | COMP |
+| `LT-Neutral-Depot` | LT-Neutral-Depot | Left Trench | COMP |
+| `LT-Neutral` | LT-Neutral | Left Trench | COMP |
+| `LT-DoubleNeutral` | LT-DoubleNeutral | Left Trench | COMP |
+| `RightTrench-Outpost` | RightTrench-Outpost | Right Trench | COMP |
+| `RT-Neutral-Outpost` | RT-Neutral-Outpost | Right Trench | COMP |
+| `Rotate-RT-Neutral` | Rotate-RT-Neutral | Right Trench | WIP |
+| `RT-Neutral` | RT-Neutral | Right Trench | COMP |
+| `RT-DoubleNeutral` | RT-DoubleNeutral | Right Trench | COMP |
+| `RT-BLOCK` | RT-BLOCK | Right Trench | COMP |
+| `LT-BLOCK` | LT-BLOCK | Left Trench | COMP |
+
+<Tip>
+  Several additional `.auto` files exist in the deploy directory but are **not** registered in `AutoLogic.initPaths()` and therefore never appear in the SmartDashboard chooser. These include `AntiSteal.auto`, `RT-Neutral-Hub.auto`, `RT-Neutral-Climb.auto`, `LT-Neutral-Climb.auto`, and `Rotate-LT-Neutral.auto`. They can be promoted to active routines by adding the corresponding `AutoPath` entries in `initPaths()`.
+</Tip>
+
+## Default path
+
+When no path is selected in the chooser — or when the `"Default"` option is active — `AutoLogic.getSelectedAuto()` falls back to the `"Default"` auto:
+
+```java
+private static AutoPath defaultPath = new AutoPath("Default", "Default");
+```
+
+The `Default.auto` file contains no commands and simply resets odometry, giving the robot a safe no-op for untested match configurations.
+
+## PathPlanner settings files
+
+Four settings variants are deployed to `src/main/deploy/pathplanner/`. `AutoBuilderConfig.setRobot()` selects the active configuration at startup based on `RobotType`.
+
+<CardGroup cols={2}>
+  <Card title="settings(comp).json" icon="robot">
+    Competition robot. Mass: 63 kg, max velocity: 4.5 m/s, max acceleration: 6 m/s², wheel radius: 0.049 m.
+  </Card>
+  <Card title="settings(alpha).json" icon="flask">
+    Alpha (practice) robot. Mass: 52.7 kg, max velocity: 2.0 m/s, max acceleration: 2 m/s², wheel radius: 0.048 m.
+  </Card>
+  <Card title="settings.json" icon="wrench">
+    Shared baseline used by the PathPlanner GUI. Max velocity: 4.5 m/s, max acceleration: 3.5 m/s². Auto folders: `COMP`, `WIP`.
+  </Card>
+  <Card title="settings(sim).json" icon="computer">
+    Simulation robot. Mass: 45.4 kg, max velocity: 5.0 m/s, max acceleration: 4.75 m/s², wheel radius: 0.048 m. Smaller dimensions: 0.743 × 0.851 m.
+  </Card>
+</CardGroup>
+
+All four variants use KrakenX60 drive motors, a 5.36:1 drive gearing, 0.546 m track width, and a 60 A drive current limit.
+
+## Loading a path directly
+
+In addition to `AutoBuilder.buildAuto()`, individual `.path` files can be loaded directly via `PathPlannerPath.fromPathFile()`. `AutoLogic.getAutoCommand()` exposes this for one-off path following:
+
+```java
+public static Command getAutoCommand(String pathName)
+    throws FileVersionException, IOException, ParseException {
+
+    PathPlannerPath path = PathPlannerPath.fromPathFile(pathName);
+    return AutoBuilder.followPath(path);
+}
+```
+
+This is distinct from `.auto` file execution and does not run any named commands embedded in the auto sequence.
+
+## AutoDriveRotate — teleop launcher aiming
+
+`AutoDriveRotate.autoRotate()` is a field-centric swerve command that rotates the drivebase to face the hub while the driver controls translation. It is used during teleop launcher aiming and also appears inside `launcherSimCommand()` for simulation purposes.
+
+```java
+public static Command autoRotate(
+    CommandSwerveDrivetrain drivebaseSubsystem,
+    DoubleSupplier xSupplier,
+    DoubleSupplier ySupplier,
+    DoubleSupplier turretOffsetDegrees)
+```
+
+The controller is a PID loop (`kP = 8.0`, `kI = 0.0`, `kD = 0.0`) clamped to ±2π rad/s, with a position tolerance of 3° and velocity tolerance of 5°/s. The command finishes automatically when `isFinished()` returns `true` — but only while autonomous is enabled; in teleop it runs continuously.
+
+## AutonomousField — path ghost display
+
+`AutonomousField` animates a ghost robot along the selected auto trajectory in the SmartDashboard field view during the disabled period. It is initialised via:
+
+```java
+AutonomousField.initSmartDashBoard(tabName, columnIndex, rowIndex, addPeriodic);
+```
+
+Internally, `initSmartDashBoard()` registers a `addPeriodic` callback at **50 ms** (20 Hz) that calls `autonomousField.update(AutoLogic.getSelectedAutoName())`. On each tick the ghost pose is advanced through the pre-generated `PathPlannerTrajectory` list at the configured `DisplaySpeed` multiplier (default `1.0`, adjustable via `Autos/DisplaySpeed` in NetworkTables). Two `Field2d` objects are published:
+
+| SmartDashboard Key | Contents |
+|---|---|
+| `Selected auto` | Animated ghost pose along the full trajectory |
+| `Start pose` | Static starting pose of the selected auto |
+
+The estimated total auto duration (in seconds, rounded to 2 decimal places) is published to `Est. Time (s)`.
+
+## Choreo integration
+
+The project includes a Choreo trajectory project alongside PathPlanner:
+
+- **`src/main/deploy/choreo/REBUILT.chor`** — the Choreo project file
+- **`src/main/deploy/choreo/NewPath_copy1.traj`** — one trajectory exported from Choreo
+
+These files are not currently referenced by `AutoLogic` but are available for future Choreo-based path following via PathPlanner's Choreo support.

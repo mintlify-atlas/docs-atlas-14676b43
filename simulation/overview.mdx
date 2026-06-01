@@ -1,0 +1,161 @@
+---
+title: "Simulation: ground truth physics and robot testing"
+sidebarTitle: "Overview"
+description: "Full WPILib desktop simulation with ground-truth drivetrain physics, three-camera vision simulation, and fuel game-piece trajectory modeling."
+---
+
+REBUILT 2026 supports full WPILib desktop simulation including ground-truth drivetrain physics, vision simulation, and fuel (game piece) trajectory simulation. All simulation-specific logic is isolated inside a single `SimWrapper` class so that `Robot` and the rest of the codebase remain unaware of whether they are running on a real robot or on a desktop.
+
+## Running the simulator
+
+<Steps>
+  <Step title="Start the simulation">
+    Run the Gradle simulation task from the project root:
+
+    ```bash
+    ./gradlew simulateJava
+    ```
+
+    The WPILib Simulation GUI opens automatically because `wpi.sim.addGui().defaultEnabled = true` is set in `build.gradle`.
+  </Step>
+
+  <Step title="High-fidelity vision (optional)">
+    Add `-PhighFidelityVision=true` to switch all three cameras from 320 × 240 to 1280 × 800 with tighter calibration noise:
+
+    ```bash
+    ./gradlew simulateJava -PhighFidelityVision=true
+    ```
+
+    This flag is read as a JVM system property (`highFidelityVision`) inside `VisionSimConstants` and affects resolution, calibration error, minimum target area, and distance-variance scale.
+  </Step>
+</Steps>
+
+<Note>
+  JVM heap flags `-Xmx2G -Xms2G` are applied automatically to every `simulate*` Gradle task via `build.gradle`:
+
+  ```groovy
+  tasks.withType(JavaExec).configureEach {
+      if (name.toLowerCase().contains("simulate")) {
+          jvmArgs "-Xmx2G", "-Xms2G"
+          systemProperty 'highFidelityVision', HIGH_FIDELITY_VISION
+      }
+  }
+  ```
+
+  You do not need to set these manually.
+</Note>
+
+## SimWrapper — unified simulation entry point
+
+`SimWrapper` is the single object that owns every simulation concern. It is constructed in `Robot` only when `Robot.isSimulation()` is `true`, and the reference is `null` on a real robot:
+
+```java
+// Robot.java (constructor)
+if (Robot.isSimulation()) {
+    m_simWrapper = new SimWrapper(subsystems.drivebaseSubsystem, this::resetRobotPose);
+} else {
+    m_simWrapper = null;
+}
+```
+
+Internally `SimWrapper` holds:
+
+| Field | Type | Purpose |
+|---|---|---|
+| `m_groundTruthSim` | `GroundTruthSimInterface` | Tracks the real physics pose independently of odometry |
+| `m_visionSims` | `List<VisionSimInterface>` | One `VisionSim` per camera (three cameras: A, B, C) |
+| `m_sharedVisionSystemSim` | `VisionSystemSim` | Shared PhotonVision scene — updated once per cycle |
+| `m_simDebugField` | `Field2d` | SmartDashboard field widget for pose visualization |
+| `m_showVisionOnField` | `ShowVisionOnField` | Draws estimated pose, module positions, and ground-truth pose on the Field2d |
+| `m_groundTruthPosePublisher` | `StructPublisher<Pose2d>` | Publishes `DriveState/GroundTruthPose` to NetworkTables for AdvantageScope |
+
+## SimWrapper lifecycle
+
+### `robotPeriodic()`
+
+Called from `Robot.robotPeriodic()` **before** `VisionSubsystem.update()`. This ensures that the Limelight NetworkTables entries are populated with fresh synthetic vision data before any code in the same loop reads them:
+
+```java
+// Robot.java — robotPeriodic()
+if (Robot.isSimulation() && m_simWrapper != null) {
+    m_simWrapper.robotPeriodic();   // updates all VisionSim instances first
+}
+subsystems.visionSubsystem.update(); // then VisionSubsystem reads the fresh NT data
+```
+
+Inside `SimWrapper.robotPeriodic()`, every camera's `VisionSimInterface::periodic` is called, which runs pose estimation and writes `botpose_wpiblue`, `botpose_orb_wpiblue`, and all other Limelight-format entries to the relevant `limelight-*` NetworkTable.
+
+### `simulationPeriodic()`
+
+Called from `Robot.simulationPeriodic()`. Runs in order:
+
+1. **Ground-truth physics** — `m_groundTruthSim.simulationPeriodic()` integrates the drivetrain chassis speeds to advance the ground-truth pose and publishes telemetry to SmartDashboard.
+2. **Vision scene update** — `m_sharedVisionSystemSim.update(groundTruthPose)` moves all simulated cameras to the ground-truth position so they see the correct AprilTags.
+3. **NT publish** — `m_groundTruthPosePublisher.set(groundTruthPose)` sends the ground-truth pose to `DriveState/GroundTruthPose`.
+4. **Field2d visualization** — `m_showVisionOnField` draws both the odometry-estimated pose (with swerve modules) and the ground-truth pose on the shared `Field2d`.
+
+```java
+// SimWrapper.java — simulationPeriodic()
+m_groundTruthSim.simulationPeriodic();
+
+Pose2d groundTruthPose = m_groundTruthSim.getGroundTruthPose();
+m_sharedVisionSystemSim.update(groundTruthPose);
+m_groundTruthPosePublisher.set(groundTruthPose);
+
+m_showVisionOnField.showEstimatedPoseAndWheels(
+    ShowVisionOnField.FieldType.SIMULATION_FIELD, driveState);
+m_showVisionOnField.showGroundTruthPoseOnField(
+    ShowVisionOnField.FieldType.SIMULATION_FIELD, groundTruthPose);
+```
+
+## GroundTruthSim
+
+`GroundTruthSim` (created by `GroundTruthSimFactory`) drives the CTRE `SwerveDrivetrain` simulation loop. Each call to `simulationPeriodic()` integrates the drivetrain's reported `ChassisSpeeds` forward in time to advance a `Pose2d` that represents the robot's physical location — independent of any drift introduced into the pose estimator. The ground-truth pose is published to SmartDashboard under `Sim/GroundTruth/*` and to `DriveState/GroundTruthPose` via NetworkTables.
+
+## RobotSim and FuelSim
+
+`RobotSim` wraps `GroundTruthSim` and `FuelSim` into a single game-piece simulation object. It is constructed alongside `SimWrapper` in `Robot`:
+
+```java
+// Robot.java
+if (Robot.isSimulation()) {
+    robotSim = new RobotSim(subsystems.drivebaseSubsystem);
+}
+```
+
+`RobotSim` registers the robot's geometry (0.8 m × 0.8 m, 0.7 m bumper height) and an intake bounding box with `FuelSim`, and starts the physics thread.
+
+**`resetFuelSim()`** is called at the start of autonomous to clear all field fuel and respawn the starting configuration:
+
+```java
+// Robot.java — autonomousInit()
+if (Robot.isSimulation()) {
+    robotSim.resetFuelSim();
+}
+```
+
+**`FuelSim.launchFuel()`** models fuel game pieces being launched with full ballistics (gravity, optional air resistance, coefficient-of-restitution collisions with the field, hubs, and trench). The sim launcher command calls:
+
+```java
+FuelSim.getInstance().launchFuel(
+    launchVelocity,   // LinearVelocity
+    hoodAngle,        // Angle — 0° = horizontal, 90° = straight up
+    turretYaw,        // Angle — robot-relative
+    launchHeight      // Distance — must be above bumper height
+);
+```
+
+Scored fuel positions are published to `Fuel Simulation/Fuels` and the running score is published to `Fuel Simulation/Score`.
+
+## Simulation controller shortcuts
+
+Two POV (D-pad) bindings on the driver controller are active **only in simulation**:
+
+<Tip>
+  Use the D-pad on the driver controller to stress-test vision correction without writing any extra code:
+
+  | Input | Action |
+  |---|---|
+  | **POV-right** | `simWrapper.injectDrift(0.5, 15.0)` — offsets the pose estimator 0.5 m in a random direction and ±15° in heading while leaving the ground-truth pose unchanged. Vision should correct it within a few frames. |
+  | **POV-left** | `simWrapper.cycleResetPosition(Pose2d.kZero)` — cycles through four reset positions: auto start on the correct alliance side, auto start on the wrong alliance side, field origin on the correct side, and field origin on the wrong side. A 2-second timeout restarts the cycle. |
+</Tip>

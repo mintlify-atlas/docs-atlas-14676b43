@@ -1,0 +1,200 @@
+---
+title: "Vision simulation: PhotonVision to Limelight conversion"
+sidebarTitle: "Vision Sim"
+description: "Synthetic AprilTag observations from PhotonVision's VisionSystemSim are converted to Limelight NetworkTables format so VisionSubsystem's real pipeline processes them unchanged."
+---
+
+The vision simulation pipeline uses PhotonVision's `VisionSystemSim` to generate synthetic AprilTag observations, then converts them to Limelight NetworkTables format so `VisionSubsystem`'s real pipeline processes them completely unchanged in simulation versus on a real robot. No simulation-specific branches exist in `VisionSubsystem` — it simply reads from the `limelight-*` NetworkTables, which are populated by real hardware or by the converter depending on the environment.
+
+<Note>
+  `VisionSim` (and all classes in `frc.robot.sim.visionproducers`) are only instantiated when `Robot.isSimulation()` returns `true`. Both `VisionSim` and `VisionSimFactory` throw `IllegalStateException` if constructed outside simulation.
+</Note>
+
+## Pipeline architecture
+
+Data flows through the following stages each robot cycle:
+
+```
+PhotonVision VisionSystemSim
+        │  (ground-truth robot pose drives the scene)
+        ▼
+VisionSim  (implements VisionSimInterface, one instance per camera)
+        │  reads PhotonPipelineResult via PhotonCamera
+        ▼
+PhotonToLimelightConverter
+        │  stateless conversion: PhotonPipelineResult → LimelightData
+        ▼
+LimelightTablePublisher
+        │  writes to NetworkTables table "limelight-a" / "limelight-b" / "limelight-c"
+        ▼
+VisionSubsystem.update()
+        │  reads botpose_wpiblue, botpose_orb_wpiblue, tv, tx, ty, …
+        ▼
+Drivetrain pose estimator
+```
+
+The `VisionSystemSim` scene is updated once per cycle in `SimWrapper.simulationPeriodic()` using the ground-truth pose so the cameras see AprilTags at the robot's true physical location — not its drifted odometry estimate.
+
+## VisionSimFactory
+
+`VisionSimFactory.create()` constructs all three camera simulations and returns a `VisionSimResult` record:
+
+```java
+public record VisionSimResult(
+    List<VisionSimInterface> visionSims,
+    VisionSystemSim sharedSim,
+    Field2d debugField) {}
+```
+
+All cameras share a single `VisionSystemSim` instance (named `"main"`) and the same `Field2d` debug widget. The three cameras are configured as:
+
+| Config constant | Limelight table | PhotonVision camera name |
+|---|---|---|
+| `kVisionA` | `limelight-a` | `photonvision-a` |
+| `kVisionB` | `limelight-b` | `photonvision-b` |
+| `kVisionC` | `limelight-c` | `photonvision-c` |
+
+Camera transforms (`robotToCam`) for cameras A and B come from `VisionSubsystem.COMP_BOT_LEFT_CAMERA` and `VisionSubsystem.COMP_BOT_FRONT_CAMERA` so simulation geometry matches the real robot exactly.
+
+## VisionSimConstants
+
+`VisionSimConstants` holds all camera simulation parameters. Values switch between two sets depending on the `highFidelityVision` JVM system property:
+
+| Parameter | Low fidelity (default) | High fidelity (`-PhighFidelityVision=true`) |
+|---|---|---|
+| Resolution | 320 × 240 | 1280 × 800 |
+| Calibration error avg | 0.12 px | 0.44 px |
+| Calibration error std dev | 0.035 px | 0.13 px |
+| Min target area | 10.0 px² | 133.0 px² |
+| Avg distance tolerance | 1.3 m | 4.78 m |
+| Distance variance scale | 3.33 | 12.2 |
+
+Parameters shared regardless of fidelity mode:
+
+```java
+public static final double kCameraFOVDegrees   = 90.0;
+public static final double kCameraFPS          = 15;
+public static final double kAvgLatencyMs       = 50;
+public static final double kLatencyStdDevMs    = 15;
+public static final double kMaxSightRangeMeters = 3.0;
+```
+
+Standard deviation heuristics for the pose estimator:
+
+```java
+// Single-tag estimate (high uncertainty)
+public static final Matrix<N3, N1> kSingleTagStdDevs = VecBuilder.fill(4, 4, 8);
+
+// Multi-tag estimate (lower uncertainty, scaled further by distance)
+public static final Matrix<N3, N1> kMultiTagStdDevs  = VecBuilder.fill(0.5, 0.5, 1);
+```
+
+When only one tag is visible and the robot is farther than `kAvgDistTolerance`, std devs are set to `Double.MAX_VALUE` (the estimate is effectively ignored).
+
+## VisionSim
+
+Each `VisionSim` instance wraps one `PhotonCamera` and one `PhotonPoseEstimator`. Its `periodic()` method (called from `SimWrapper.robotPeriodic()`) drains all unread `PhotonPipelineResult` objects and for each one:
+
+1. Attempts a multi-tag coprocessor pose estimate (`estimateCoprocMultiTagPose`).
+2. Falls back to lowest-ambiguity single-tag estimate (`estimateLowestAmbiguityPose`).
+3. Updates dynamic std devs via the distance/tag-count heuristic.
+4. Converts the result to `LimelightData` via `PhotonToLimelightConverter.convertPipelineResult()`.
+5. Fills in the botpose arrays via `PhotonToLimelightConverter.convertBotpose()`.
+6. Publishes everything through `LimelightTablePublisher`.
+
+```java
+// VisionSim.java — simplified flow
+for (var result : m_camera.getAllUnreadResults()) {
+    visionEst = m_photonEstimator.estimateCoprocMultiTagPose(result);
+    if (visionEst.isEmpty()) {
+        visionEst = m_photonEstimator.estimateLowestAmbiguityPose(result);
+    }
+    updateEstimationStdDevs(visionEst, result.getTargets());
+
+    LimelightData data =
+        PhotonToLimelightConverter.convertPipelineResult(result, m_config.robotToCam());
+    PhotonToLimelightConverter.convertBotpose(
+        visionEst.map(est -> est.estimatedPose).orElse(null),
+        result.getTargets(), m_config.robotToCam(), totalLatencyMs, data);
+    m_limelightPublisher.publish(data);
+}
+```
+
+The `PhotonCameraSim` is added to the shared `VisionSystemSim` with wireframe rendering enabled (`enableDrawWireframe(true)`), so each camera's view can be inspected in the SimGUI.
+
+## PhotonToLimelightConverter
+
+`PhotonToLimelightConverter` is a stateless utility class (no I/O, fully unit-testable) that translates `PhotonVision` data structures into the `LimelightData` format. Key conversions:
+
+| Method | Output fields populated |
+|---|---|
+| `convertTarget()` | `tv`, `tx`, `ty`, `txnc`, `tync`, `ta`, `tid` |
+| `convertTargetPose3d()` | `targetpose_cameraspace`, `camerapose_targetspace` (6-element double arrays) |
+| `convertRawFiducials()` | `rawfiducials` (7 values per tag: id, yaw, pitch, area, distToCamera, distToRobot, ambiguity) |
+| `convertT2D()` | `t2d` (17-element array matching Limelight's t2d format) |
+| `convertBotpose()` | `botpose_wpiblue`, `botpose_wpired`, `botpose3dWpiBlue` — 11 + 7 × tagCount elements |
+
+The botpose arrays use WPILib field coordinate origins. For the Red alliance array, both X and Y coordinates are mirrored and yaw is rotated 180°.
+
+## LimelightData
+
+`LimelightData` is a plain mutable data class with no WPILib or NetworkTables dependencies, mirroring exactly what a physical Limelight 3G/4 publishes:
+
+```java
+public class LimelightData {
+    public boolean  targetValid        = false;
+    public double   tx, ty, txnc, tync, ta;
+    public int      tid                = -1;
+    public double   pipelineLatencyMs  = 0;
+    public double   captureLatencyMs   = 0;
+    public double[] targetPoseCameraSpace = new double[6];
+    public double[] cameraPoseTargetSpace = new double[6];
+    public double[] rawFiducials       = new double[0];
+    public double[] t2d                = new double[17];
+    public double[] botposeWpiBlue     = new double[0];
+    public double[] botposeWpiRed      = new double[0];
+    public Pose3d   botpose3dWpiBlue;
+}
+```
+
+## LimelightTablePublisher
+
+`LimelightTablePublisher` is the only class with a NetworkTables dependency. It writes every `LimelightData` field to the named `limelight-*` table each cycle, including:
+
+- `tv`, `tx`, `ty`, `txnc`, `tync`, `ta`, `tid`
+- `tl` (pipeline latency), `cl` (capture latency)
+- `hb` (heartbeat counter — increments each frame, wraps at 2 billion)
+- `targetpose_cameraspace`, `camerapose_targetspace`
+- `rawfiducials`, `t2d`
+- `botpose_wpiblue`, `botpose_wpired`
+- `botpose_orb_wpiblue`, `botpose_orb_wpired` (MegaTag2 entries — same data as MegaTag1 in simulation)
+- `botpose_wpiblue_pose3d` (convenience `Pose3d` struct, not present on real hardware)
+
+## ShowVisionOnField
+
+`ShowVisionOnField` draws three categories of robot poses onto the shared `Field2d`:
+
+| Field2d object name | Content |
+|---|---|
+| `EstimatedRobot` | Current drivetrain pose (odometry + vision correction) |
+| `EstimatedRobotModules` | Four swerve module poses (position + steering angle) |
+| `GroundTruthRobot` | Ground-truth physics pose |
+| `Vision_<camera>_MT1` | Per-camera MegaTag1 vision estimate (hidden when no target) |
+| `Vision_<camera>_MT2` | Per-camera MegaTag2 vision estimate (hidden when no target) |
+
+The `FieldType` enum selects between `REAL_FIELD` and `SIMULATION_FIELD`. In simulation only `SIMULATION_FIELD` is used. `VisionSubsystem` calls `showPointInTimeVisionEstimate()` on `SIMULATION_FIELD` via the `ShowVisionOnField` instance wired up in `Robot`:
+
+```java
+// Robot.java (constructor)
+if (Robot.isSimulation() && m_simWrapper != null) {
+    ShowVisionOnField showVisionOnField =
+        new ShowVisionOnField(null, m_simWrapper.getSimDebugField());
+    if (subsystems.visionSubsystem != null) {
+        subsystems.visionSubsystem.setShowVisionOnField(showVisionOnField);
+    }
+}
+```
+
+<Tip>
+  Load the VisionSim SimGUI layout (`Simgui_layouts/VisionSim/simgui.json`) to see all three cameras' estimated poses, ground truth, and odometry estimate on the same Field2d widget simultaneously. See [SimGUI Layouts](/simulation/simgui-layouts) for copy instructions.
+</Tip>

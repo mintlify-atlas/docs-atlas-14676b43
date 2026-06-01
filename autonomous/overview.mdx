@@ -1,0 +1,136 @@
+---
+title: "Autonomous overview: PathPlanner routing and auto logic"
+sidebarTitle: "Overview"
+description: "How REBUILT 2026 uses PathPlanner 2026.1.2, AutoLogic, and SmartDashboard choosers to filter, select, and execute autonomous routines."
+---
+
+REBUILT 2026 uses PathPlanner (2026.1.2) for autonomous path following. `AutoLogic` manages a dynamic chooser that filters available autos by the selected start position and builds the chosen routine at match start using `AutoBuilder.buildAuto()`.
+
+## Initialization flow
+
+The autonomous system must be initialized in a strict order before match start. The steps below reflect the actual call sequence executed in `Robot.java`.
+
+<Steps>
+  <Step title="Configure the drivebase with AutoBuilderConfig">
+    `AutoBuilderConfig.buildAuto(drivebase, unitTest)` calls `AutoBuilder.configure(...)` with the robot's pose supplier, odometry reset method, chassis speeds supplier, and a `PPHolonomicDriveController` (translation PID `5.0 / 0.0 / 0.0`, rotation PID `5.0 / 0.0 / 0.0`). The correct robot config file (`comp`, `alpha`, or `sim`) is selected automatically based on `RobotType`.
+
+    ```java
+    AutoBuilderConfig.buildAuto(drivebase, false);
+    ```
+  </Step>
+  <Step title="Register named commands and initialize paths">
+    `AutoLogic.initCommandsAndPaths(testMode)` first calls `registerCommands()` (unless in test mode) to register the `launch`, `intake`, and `climb` named commands with PathPlanner, then calls `initPaths()` to build the list of `AutoPath` objects and populate `namesToAuto`.
+
+    ```java
+    AutoLogic.initCommandsAndPaths(false);
+    ```
+
+    <Warning>
+      Named commands **must** be registered before paths are loaded. `initCommandsAndPaths()` enforces this order internally — never call `initPaths()` directly or register commands after paths are built.
+    </Warning>
+  </Step>
+  <Step title="Publish SmartDashboard choosers">
+    `AutoLogic.initSmartDashBoard()` puts the three choosers onto the SmartDashboard and wires `onChange` callbacks so that the available-autos list refreshes whenever the operator changes the start position or game-object count.
+
+    ```java
+    AutoLogic.initSmartDashBoard();
+    ```
+
+    <Note>
+      `initSmartDashBoard()` calls `requirePathsInitialized()` internally and will throw an `IllegalStateException` if `initCommandsAndPaths()` has not been called first.
+    </Note>
+  </Step>
+  <Step title="Schedule the selected auto in autonomousInit()">
+    When autonomous mode starts, `AutoLogic.getSelectedAuto()` returns a command that waits for the configured delay (read from the `Autos/Auto Delay` NetworkTables entry) and then runs the selected PathPlanner auto by name.
+
+    ```java
+    // In autonomousInit():
+    Command auto = AutoLogic.getSelectedAuto();
+    auto.schedule();
+    ```
+  </Step>
+</Steps>
+
+## SmartDashboard choosers
+
+Three choosers are published to the SmartDashboard during `initSmartDashBoard()`.
+
+| SmartDashboard Key | Type | Purpose |
+|---|---|---|
+| `Starting Position` | `SendableChooser<StartPosition>` | Selects the robot's start zone; triggers `filterAutos()` on change |
+| `Auto Mode` | `SendableChooser<Integer>` | Selects the number of game objects (currently `0` is the only mapped bucket) |
+| `Available Auto Variants` | `DynamicSendableChooser<String>` | Repopulated by `filterAutos()` to show only valid autos for the chosen start position |
+
+An additional `Auto Key` string (`"RB=Right Bump, LB=Left Bump, LT=Left Trench, RT=Right Trench"`) is published as a reference legend.
+
+## StartPosition enum
+
+Each `StartPosition` value carries a display title and a `Pose2d` that auto starting poses are matched against (within ±0.05 m in X/Y and ±5° in heading).
+
+| Enum Value | Display Title | X (m) | Y (m) | Heading |
+|---|---|---|---|---|
+| `LEFT_TRENCH` | Left Trench | 4.013 | 7.597 | 90° |
+| `CENTER` | Center | 3.600 | 4.035 | 0° |
+| `RIGHT_TRENCH` | Right Trench | 4.013 | 0.473 | −90° |
+| `MISC` | Misc | — | — | null start pose |
+
+`MISC` is the default selection. Any auto whose starting pose does not match one of the three physical positions is assigned to `MISC`.
+
+## Auto delay
+
+The operator can set a pre-auto wait time (in seconds) via the `Autos/Auto Delay` NetworkTables entry. The entry is initialised to `0.0` in `initSmartDashBoard()`. `getSelectedAuto()` reads this value at schedule time:
+
+```java
+double delay = autoDelayEntry.getDouble(0.0);
+return Commands.waitSeconds(delay).andThen(AutoBuilder.buildAuto(autoName)).withName(autoName);
+```
+
+## getSelectedAuto()
+
+`AutoLogic.getSelectedAuto()` is the primary entry point for autonomous mode. It resolves the selected auto name from `DynamicSendableChooser`, falls back to the `"Default"` path if nothing is selected, prepends the configured delay, and returns the composed command.
+
+```java
+public static Command getSelectedAuto() {
+    requirePathsInitialized();
+
+    double delay = autoDelayEntry.getDouble(0.0);
+
+    AutoPath path = namesToAuto.get(getSelectedAutoName());
+    if (path == null) {
+        path = defaultPath;
+    }
+
+    String autoName = path.getAutoName();
+    return Commands.waitSeconds(delay).andThen(AutoBuilder.buildAuto(autoName)).withName(autoName);
+}
+```
+
+## filterAutos(numGameObjects)
+
+`filterAutos(int numGameObjects)` clears the `availableAutos` chooser and repopulates it with only those paths whose `startPosition` matches the currently-selected `StartPosition`. The `"Default"` path is always the chooser default regardless of filter state.
+
+```java
+public static void filterAutos(int numGameObjects) {
+    requirePathsInitialized();
+
+    availableAutos.clearOptions();
+    availableAutos.setDefaultOption(defaultPath.getDisplayName(), defaultPath.getDisplayName());
+
+    List<AutoPath> autoList = commandsMap.get(numGameObjects);
+    if (autoList == null) return;
+
+    for (AutoPath auto : autoList) {
+        if (auto.getStartPose().equals(startPositionChooser.getSelected())) {
+            availableAutos.addOption(auto.getDisplayName(), auto.getDisplayName());
+        }
+    }
+}
+```
+
+## Simulation pose reset
+
+`AutoLogic.getSelectedAutoStartingPose()` returns the `Pose2d` of the currently-selected auto, or `Pose2d.kZero` if no valid starting pose is available. This is used in simulation to reset the robot's odometry to the correct position before the auto runs.
+
+<Note>
+  Every public method in `AutoLogic` that depends on the path list calls `requirePathsInitialized()` as its first statement. If `initCommandsAndPaths()` has not been called, an `IllegalStateException` is thrown with a descriptive message.
+</Note>

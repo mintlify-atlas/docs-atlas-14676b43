@@ -1,0 +1,114 @@
+---
+title: "Vision: Limelight MegaTag2 pose estimation pipeline"
+sidebarTitle: "Vision"
+description: "Three-Limelight MegaTag2 fusion pipeline with defense detection, inter-tag spread rejection, and adaptive standard deviation weighting."
+---
+
+`VisionSubsystem` fuses pose measurements from three Limelights — **limelight-a**, **limelight-b**, and **limelight-c** — into the drivebase pose estimator via `drivetrain.addVisionMeasurement()`. Both MegaTag1 (MT1) and MegaTag2 (MT2) solve modes are processed each cycle. Each camera maintains its own last-accepted pose independently for the per-solve-mode velocity plausibility gate.
+
+## Camera positions (comp bot)
+
+All transforms are robot-origin → camera-lens, using WPILib axes (X forward, Y left, Z up):
+
+| Camera | Hardware name | Transform3d (x, y, z) | Orientation |
+|---|---|---|---|
+| A (`LIMELIGHT_A`) | `limelight-a` | (-0.076, 0.311, 0.274) | pitch = -20°, yaw = +90° (left-facing) |
+| B (`LIMELIGHT_B`) | `limelight-b` | (0.295, -0.288, 0.273) | pitch = -20° (front-facing) |
+| C (`LIMELIGHT_C`) | `limelight-c` | (0.212, -0.371, 0.273) | pitch = -20°, yaw = -90° (right-facing) |
+
+## MT1 vs MT2
+
+| Mode | Heading source | θ std dev |
+|---|---|---|
+| **MegaTag1 (MT1)** | Solved from vision; ambiguity-gated (max < 0.4); single-tag limited to 2.0 m | `π/60` rad (multi-tag), `MAX_VALUE` (single-tag) |
+| **MegaTag2 (MT2)** | Locked to gyro (`θ = MAX_VALUE`) — heading never updated from MT2 | Always `MAX_VALUE` |
+
+MT2 provides more accurate XY at the cost of heading independence. MT1 provides heading corrections when multiple tags are visible.
+
+## Measurement pipeline (`processLimelight`)
+
+Each measurement goes through a sequential rejection pipeline. The first failed check publishes a `_rejectReason` string to SmartDashboard and discards the measurement.
+
+<Steps>
+  <Step title="Stale-timestamp check">
+    If `estimate.timestampSeconds == camera.getLastTimestampSeconds()` the Limelight has not returned a new frame. Reason: `stale-timestamp`.
+  </Step>
+  <Step title="Alpha bot velocity gate">
+    On the alpha bot only: if |vx|, |vy| > **2.0 m/s** or |ω| > **0.2 rad/s**, the measurement is dropped. Reason: `alpha-max-speed`.
+  </Step>
+  <Step title="Impossible rotation / height check">
+    If the pose 3D roll or pitch exceeds **12°**, or the 2D pose matches the last accepted pose exactly, the measurement is discarded. Reason: `impossible-rotation or height`.
+  </Step>
+  <Step title="Field boundary check">
+    Pose must be within the field boundary plus a **0.5 m margin** on all sides. Reason: `off-field`.
+  </Step>
+  <Step title="Velocity plausibility check">
+    Vision-implied speed (distance between consecutive accepted poses / dt) must be below **7.0 m/s** normally, or **12.0 m/s** under defense. Reason: `velocity-implausible`.
+  </Step>
+  <Step title="Inter-tag spread check">
+    RMS error between per-tag independent distance estimates and the reported pose must be below **0.50 m**. If any tag ID is unknown, the entire observation is hard-rejected. Reason: `inter-tag-inconsistent`.
+  </Step>
+  <Step title="Ambiguity / range gate">
+    Std dev computation returns `MAX_VALUE` (⟹ measurement weight ≈ 0) if ambiguity ≥ 0.4, or if a single-tag observation exceeds the range gate (MT1: 2.0 m, MT2: 5.0 m). Reason: `ambiguity-or-range`.
+  </Step>
+  <Step title="Accepted — addVisionMeasurement">
+    `drivetrain.addVisionMeasurement(visionPose2d, fpgaTimestamp, stdDevs)` is called. The per-camera last-accepted pose and timestamp are updated.
+  </Step>
+</Steps>
+
+## Standard deviation formula
+
+```
+xy = A_XY * dist^P_XY / sqrt(harmonicSum) * ambiguityInflation
+```
+
+Where:
+- `A_XY_MT2 = 0.07` (default, tunable via `/vision/A_XY_MT2`)
+- `A_XY_MT1 = 0.09` (default, tunable via `/vision/A_XY_MT1`)
+- `P_XY = 1.4` (distance exponent, tunable via `/vision/P_XY`)
+- `harmonicSum = Σ 1/dist²` over all visible tags
+- `ambiguityInflation = 1 / (1 - maxAmbiguity)²`
+
+If spread > `SPREAD_INFLATE_START` (0.10 m), std devs are further multiplied by `(spread / 0.10)²`.
+
+## Defense detection
+
+`isUnderDefense()` fires when either of two conditions is true:
+
+| Condition | Trigger |
+|---|---|
+| **`likelySpun`** | Rotational speed |ω| > **2.5 rad/s** AND translation speed < **1.0 m/s** (suggests being spun by an opponent) |
+| **`positionDiverged`** | Vision-odometry disagreement > `DEFENSE_DRIFT_RATE × dt + DEFENSE_DIVERGE_BASE` (0.02 m/s × dt + 0.30 m) |
+
+When under defense, std devs are multiplied by `DEFENSE_STD_DEV_SCALE = 0.5`, halving std devs and quadrupling the filter weight — making the pose estimator trust vision more aggressively during contact.
+
+## Auto odometry reset
+
+If the drivebase pose walks off the field boundary AND a camera simultaneously sees **≥ 2 tags** with ambiguity **< 0.15**, `drivetrain.resetTranslation(visionPose.getTranslation())` is called to snap the odometry back onto the field. Heading is preserved to avoid fighting the gyro.
+
+## Limelight online check
+
+`isLimeLightOnline(String name)` reads the `hb` (heartbeat) NetworkTables entry from the Limelight's table. The camera is considered online only if the entry's last-change timestamp is within **1.0 second** of the current FPGA time.
+
+## Public API
+
+| Method | Returns | Description |
+|---|---|---|
+| `update()` | `void` | Called from `Robot.periodic()` — processes all three cameras |
+| `getLastVisionPose2d()` | `Pose2d` | Most recent accepted vision pose across all cameras |
+| `isLimeLightOnline(String name)` | `boolean` | True if heartbeat updated within 1.0 s |
+| `getNumTargets()` | `int` | Sum of tag counts across active cameras |
+| `getTimeSinceLastReading()` | `double` | Seconds since the last accepted measurement |
+| `getDisableVision()` | `boolean` | Reads `/vision/disablevision` NT topic |
+
+## Disabling vision fusion
+
+Set the NetworkTables topic `/vision/disablevision` to `true` to stop all `addVisionMeasurement` calls. All three cameras will report `vision-disabled` as their rejection reason. This is useful when vision data is actively degrading the pose estimate (e.g., near a reflective surface).
+
+<Warning>
+The alpha bot uses a stricter velocity gate: `MAX_XY_VELO_ALPHA = 2.0 m/s` and `MAX_TURN_VELO_ALPHA = 0.2 rad/s`. Vision measurements are rejected at much lower speeds on the alpha bot than on the competition bot (where no hard per-axis velocity limit is enforced — only the vision-to-vision implied-speed gate applies).
+</Warning>
+
+<Note>
+`VisionSubsystem` publishes per-camera SmartDashboard entries for the last timestamp, number of targets, time since last reading, rejection reason, vision pose error (compared to the pose history at the same timestamp), and per-camera MT1/MT2 std dev values. These are useful during field calibration to verify all three cameras are contributing valid measurements.
+</Note>
