@@ -121,11 +121,11 @@ public static Translation2d predictTargetPos(
 
 ### `iterativeMovingShotFromFunnelClearance(robot, fieldSpeeds, target, iterations)`
 
-Runs the prediction loop `iterations` times. Each pass re-estimates the time of flight from the updated predicted target distance, converging toward a self-consistent solution:
+Runs the prediction loop `iterations` times. Each pass re-estimates the time of flight from the updated predicted distance, converging toward a self-consistent solution:
 
-1. Compute initial distance to target.
-2. Look up initial time of flight.
-3. For each iteration: predict new target position → recompute distance → recompute time of flight.
+1. Compute initial distance from launcher to the original target.
+2. Look up initial time of flight from the distance map.
+3. For each iteration: predict a new target position from the *original* target using the current time of flight → recompute distance from launcher to the predicted position → update time of flight.
 4. Return the final predicted target `Translation2d`.
 
 ### `angularVelocity(robot, fieldSpeeds)`
@@ -141,11 +141,11 @@ The launcher is not mounted at the robot's geometric center. `LAUNCHER_OFFSET` i
 | Competition | +0.2159 m (forward) | +0.1397 m (left) |
 | Alpha | +0.2159 m (forward) | −0.1397 m (right) |
 
-Use `turretTransform()` to retrieve the offset as a `Transform2d`, or `launcherFromRobot(robotPose)` to get the launcher's `Translation2d` in field coordinates.
+Use `turretTransform()` to retrieve the offset as a `Transform2d`, or `launcherFromRobot(robotPose)` to get the launcher offset's `Translation2d` (the X/Y components of `LAUNCHER_OFFSET` relative to the robot center — note the current implementation returns the offset vector directly).
 
 ## NetworkTables telemetry
 
-`UpdateNT(Pose2d robot)` must be called each loop (it is called from the launcher subsystem's periodic). It publishes two entries under `/SmartDashboard/LiveLauncherData/`:
+`UpdateNT(Pose2d robot)` must be called each loop. It is called from `Robot.robotPeriodic()` (not from a subsystem periodic) using the current drivebase pose. It publishes two entries under `/SmartDashboard/LiveLauncherData/`:
 
 | NT Key | Type | Content |
 |---|---|---|

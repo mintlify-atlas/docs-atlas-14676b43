@@ -118,7 +118,7 @@ Two **TalonFX** motors drive the rollers via **VelocityTorqueCurrentFOC**:
 | `TARGET_RPS` | 68 RPS | — |
 | `AGITATE_RPS` | 34 RPS (`TARGET_RPS / 2`) | — |
 
-The left roller runs on the **CANivore** bus (comp bot) while the right roller uses the **roboRIO** bus. Motors run in **Coast** neutral mode to prevent fuel damage on sudden stops.
+The left roller runs on the **roboRIO** bus (comp bot) or the alpha CANivore bus (alpha bot), while the right roller always uses the **roboRIO** bus. Motors run in **Coast** neutral mode to prevent fuel damage on sudden stops.
 
 ## Controller bindings
 

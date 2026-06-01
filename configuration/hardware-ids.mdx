@@ -1,5 +1,5 @@
 ---
-title: "Hardware IDs: CAN, PWM, and sensor assignments"
+title: "Hardware IDs: CAN, analog, and Limelight assignments"
 sidebarTitle: "Hardware IDs"
 description: "All CAN IDs, analog input ports, and Limelight NT table names for the REBUILT 2026 robot, centralized in Hardware.java and Subsystems.java."
 ---
@@ -20,6 +20,8 @@ IDs follow a deliberate grouping scheme so the CAN bus stays organized and easy 
 | Indexing motors | 30–34 |
 | Climb motor | 35–39 |
 | CANdle LED controller | 40 |
+
+Swerve devices (IDs 1–12) live on the `"Drivebase"` CAN bus defined in `CompTunerConstants`/`AlphaTunerConstants`. All other devices — including the PDH (ID 1) — are on the default RoboRIO CAN bus, so the overlapping ID 1 does not cause a conflict.
 </Note>
 
 | Constant | ID / Port | Type | Notes |

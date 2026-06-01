@@ -12,10 +12,17 @@ The autonomous system must be initialized in a strict order before match start. 
 
 <Steps>
   <Step title="Configure the drivebase with AutoBuilderConfig">
-    `AutoBuilderConfig.buildAuto(drivebase, unitTest)` calls `AutoBuilder.configure(...)` with the robot's pose supplier, odometry reset method, chassis speeds supplier, and a `PPHolonomicDriveController` (translation PID `5.0 / 0.0 / 0.0`, rotation PID `5.0 / 0.0 / 0.0`). The correct robot config file (`comp`, `alpha`, or `sim`) is selected automatically based on `RobotType`.
+    `AutoBuilderConfig.buildAuto(drivebase, unitTest)` calls `AutoBuilder.configure(...)` with the robot's pose supplier, odometry reset method, chassis speeds supplier, and a `PPHolonomicDriveController` (translation PID `5.0 / 0.0 / 0.0`, rotation PID `5.0 / 0.0 / 0.0`). When `unitTest` is `false`, the robot config is chosen as `alpha` or `comp` based on `RobotType`; passing `true` forces the `sim` config (used in unit tests only).
 
     ```java
     AutoBuilderConfig.buildAuto(drivebase, false);
+    ```
+  </Step>
+  <Step title="Inject subsystems into AutoLogic">
+    `AutoLogic.init(subsystems)` stores the `Subsystems` reference used by `registerCommands()` to access the launcher, indexer, drivebase, and other subsystems. This must be called before `initCommandsAndPaths()`.
+
+    ```java
+    AutoLogic.init(subsystems);
     ```
   </Step>
   <Step title="Register named commands and initialize paths">

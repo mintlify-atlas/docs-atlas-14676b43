@@ -1,7 +1,7 @@
 ---
 title: "Vision simulation: PhotonVision to Limelight conversion"
 sidebarTitle: "Vision Sim"
-description: "Synthetic AprilTag observations from PhotonVision's VisionSystemSim are converted to Limelight NetworkTables format so VisionSubsystem's real pipeline processes them unchanged."
+description: "Converts PhotonVision synthetic AprilTag results into Limelight NetworkTables entries so VisionSubsystem can process simulated and real data identically."
 ---
 
 The vision simulation pipeline uses PhotonVision's `VisionSystemSim` to generate synthetic AprilTag observations, then converts them to Limelight NetworkTables format so `VisionSubsystem`'s real pipeline processes them completely unchanged in simulation versus on a real robot. No simulation-specific branches exist in `VisionSubsystem` — it simply reads from the `limelight-*` NetworkTables, which are populated by real hardware or by the converter depending on the environment.

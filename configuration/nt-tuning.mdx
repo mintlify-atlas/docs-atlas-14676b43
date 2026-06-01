@@ -1,5 +1,5 @@
 ---
-title: "Live tuning with NetworkTables tunables"
+title: "Live NT tuning: NtTunableDouble, Boolean, and Integer"
 sidebarTitle: "NT Tuning"
 description: "NtTunableDouble, NtTunableBoolean, and NtTunableInteger let you adjust robot parameters live from any NT4 dashboard without redeploying code."
 ---
@@ -103,7 +103,7 @@ When the override is active, `AllianceUtils.getHubTranslation2d()` returns the h
 
 ## GCMonitor
 
-`GCMonitor` registers JMX listeners on the JVM's garbage collectors and increments an internal counter each time a GC event fires. The count is logged via `DataLogManager` with the GC action, collector name, and duration:
+`GCMonitor` registers JMX listeners on the JVM's garbage collectors and increments an internal counter each time a GC event fires. Each event is logged as a text message via `DataLogManager` with the GC action, collector name, and duration. `Robot.java` separately publishes the running count to SmartDashboard (and thus to the NT4-mirrored DataLog) under the key `GCCount`:
 
 ```java
 // Robot.java — called once at startup
@@ -115,7 +115,7 @@ GC events are logged as:
 GC #1 action=end of minor GC name=G1 Young Generation duration=3ms
 ```
 
-Use the `GCCount` key in the DataLog post-match to identify periods of elevated GC pressure, which can cause loop overruns. If GC frequency increases noticeably, look for hotspots allocating objects in periodic methods.
+Use the `GCCount` SmartDashboard entry (visible in the DataLog via NT4 mirroring) post-match to identify periods of elevated GC pressure, which can cause loop overruns. If GC frequency increases noticeably, look for hotspots allocating objects in periodic methods.
 
 <Note>
 All NT tunable writes are captured in the WPILib DataLog automatically (because the NT4 server mirrors subscribed topics to the log). After a practice match you can replay the `.wpilog` file and see exactly which values were changed and when — useful for correlating a tuning change with observed robot behavior.

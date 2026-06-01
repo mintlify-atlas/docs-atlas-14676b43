@@ -57,7 +57,7 @@ private final SwerveRequest.FieldCentric drive =
         .withDriveRequestType(DriveRequestType.Velocity);
 ```
 
-Driver joystick inputs are scaled by `MaxSpeed` (sourced from `CompTunerConstants.kSpeedAt12Volts`) and a `MaxAngularRate` of `0.75` rotations per second. A deadband of `0.1` is applied to raw joystick inputs before scaling.
+Driver joystick inputs (X, Y, and rotation) are each scaled by `MaxSpeed` (sourced from `kSpeedAt12Volts` for the active robot type). A `MaxAngularRate` of `0.75` rotations per second is defined in `Controls.java` for reference but the rotation axis is multiplied by `MaxSpeed * DRIVE_INPUT_SCALE` in the same way as the translation axes. A deadband of `0.1` is applied to raw joystick inputs before scaling.
 
 ## Operator perspective
 
@@ -89,7 +89,7 @@ Three `SysIdRoutine` instances are available for characterizing drive gains:
 |---|---|---|
 | Translation | `SysIdSwerveTranslation` | 4 V |
 | Steer | `SysIdSwerveSteerGains` | 7 V |
-| Rotation | `SysIdSwerveRotation` | π rad/s ramp, π rad/s step |
+| Rotation | `SysIdSwerveRotation` | π/6 rad/s² ramp, π rad/s step |
 
 Run quasistatic or dynamic tests via `sysIdQuasistatic(Direction)` / `sysIdDynamic(Direction)`. The active routine is pointed to by `m_sysIdRoutineToApply` (default: translation).
 
